@@ -1835,7 +1835,7 @@ DBG_PRINTf("   Offset I_A/B/C (counts): %.0f / %.0f / %.0f\n", currentOffsetA, c
   
 
 
-  xTaskCreatePinnedToCore(WebTask, "WebTask", 8192, NULL, 1, &WebTaskHandle, 0);// 🔥 CORE 0
+  xTaskCreatePinnedToCore(WebTask, "WebTask", 8192, NULL, 2, &WebTaskHandle, 0);// 🔥 CORE 0
   Serial.println("✅ Web Task (Core 0)");
   Serial.println();
 

@@ -62,6 +62,11 @@ static const unsigned long GPIO_INIT_DELAY = 10000; // 10 secunde după pornire
 
 bool websocketConnected = false;
 
+static String g_rootHtmlCache;
+static uint32_t g_rootHtmlBuiltMs = 0;
+static bool g_rootHtmlDirty = true;
+static const uint32_t ROOT_CACHE_TTL_MS = 5000;
+
 #define MANUAL_TIMEOUT_MS 60000 // 60 secunde
 
 // ================= OTA SECURITY =================
@@ -102,6 +107,8 @@ static bool initializePin(int pin, bool currentState) {
 
 // Trimite periodic date JSON către client
 void sendLiveData() {
+  if (!websocketConnected) return;
+
     StaticJsonDocument<512> doc;
 
     doc["v_a"] = v_a;
@@ -769,7 +776,14 @@ if (sigHeader.length() > 0 && firmware_buffer) {
 
 
 static void handleRoot() {
+  const uint32_t now = millis();
+  if (!g_rootHtmlDirty && g_rootHtmlCache.length() > 0 && (now - g_rootHtmlBuiltMs) < ROOT_CACHE_TTL_MS) {
+    server.send(200, "text/html", g_rootHtmlCache);
+    return;
+  }
+
     String html = "<!DOCTYPE html><html lang='it'><head><meta charset='UTF-8'>";
+  html.reserve(24576);
     html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
     html += "<title>EBS Orbital Monitor</title>";
     html += getCommonStyles();
@@ -961,7 +975,11 @@ html += "</div>";
     html += getJavaScript();
     html += "</body></html>";
 
-    server.send(200, "text/html", html);
+    g_rootHtmlCache = html;
+    g_rootHtmlBuiltMs = now;
+    g_rootHtmlDirty = false;
+
+    server.send(200, "text/html", g_rootHtmlCache);
 }
 
 
@@ -1016,6 +1034,7 @@ void handleWebSocketMessage(uint8_t num, uint8_t *payload, size_t length) {
         if (step == "Step4") Step4 = !Step4;
 
         updateStepGPIOs();
+        g_rootHtmlDirty = true;
         manualControlTimeout = millis();
         webSocket.sendTXT(num, "{\"status\":\"" + step + " commutato\"}");
 
@@ -1036,6 +1055,7 @@ void handleWebSocketMessage(uint8_t num, uint8_t *payload, size_t length) {
         pwm1 = Step1;
         ledcWrite(0, pwm1);
 
+        g_rootHtmlDirty = true;
         manualControlTimeout = millis();
         webSocket.sendTXT(num, "{\"status\":\"Step1 aggiornato a " + String(Step1) + "\"}");
 
@@ -1121,6 +1141,7 @@ if (doc.containsKey("voltageOffsetC")) {
                        prez1, prez2, prez3, prez4);
 
             saveSettingsToNVRAM();  // ⬅️ salvează toate valorile în NVRAM
+            g_rootHtmlDirty = true;
 
             webSocket.sendTXT(num, "{\"status\":\"Calibrazione salvata con offset\",\"target\":\"calibration\"}");
 
@@ -1151,6 +1172,7 @@ if (doc.containsKey("voltageOffsetC")) {
     voltageOffsetC = (float)(accVC / N);
 
     saveSettingsToNVRAM();
+    g_rootHtmlDirty = true;
 
     DBG_PRINTf("✅ AutoZero saved COUNTS: Ioff A/B/C=%.0f/%.0f/%.0f  Voff A/B/C=%.0f/%.0f/%.0f\n",
                currentOffsetA, currentOffsetB, currentOffsetC,
@@ -1164,6 +1186,7 @@ if (doc.containsKey("voltageOffsetC")) {
         if (doc.containsKey("energy")) {
             KWh = doc["energy"].as<float>();
             saveSettingsToNVRAM();
+          g_rootHtmlDirty = true;
             webSocket.sendTXT(num, "{\"status\":\"Energia impostata\",\"target\":\"energy\"}");
         }
 
@@ -1182,6 +1205,7 @@ if (doc.containsKey("voltageOffsetC")) {
             updateStepGPIOs();
         }
 
+          g_rootHtmlDirty = true;
         String s = manualControlEnabled ? "Modalità manuale ATTIVA" : "Modalità manuale DISATTIVATA";
         webSocket.sendTXT(num, "{\"status\":\"" + s + "\",\"target\":\"manual\"}");
 
@@ -1190,6 +1214,7 @@ if (doc.containsKey("voltageOffsetC")) {
         stepsEnabled = !stepsEnabled;
         updateStepGPIOs();  // Aplică imediat schimbarea
         saveSettingsToNVRAM();  // Salvează în NVRAM pentru persistență
+        g_rootHtmlDirty = true;
         
         String s = stepsEnabled ? "Alimentare stepuri ATTIVATA" : "Alimentare stepuri DISATTIVATA";
         webSocket.sendTXT(num, "{\"status\":\"" + s + "\",\"target\":\"stepsEnable\"}");
@@ -1205,6 +1230,7 @@ if (doc.containsKey("voltageOffsetC")) {
                     client.stop();
                 }
                 modbusConnected = false;
+                g_rootHtmlDirty = true;
 
                 webSocket.sendTXT(num, "{\"status\":\"IP Modbus salvato, riconnessione.\",\"target\":\"modbus\"}");
             } else {
@@ -1239,7 +1265,7 @@ void handleWebClient() {
 
     static unsigned long lastSend = 0;
     if (millis() - lastSend > 500) {
-        sendLiveData();
+      if (websocketConnected) sendLiveData();
         lastSend = millis();
     }
 
@@ -1255,6 +1281,7 @@ void handleWebClient() {
         pwm1 = 0;
         ledcWrite(0, 0);  // Reset hardware PWM
         updateStepGPIOs();  // Reset GPIO fisici
+        g_rootHtmlDirty = true;
         
         Serial.println("⏱️ Timeout modo manuale - tutti i step resettati");
         
@@ -1296,6 +1323,7 @@ void initWebServerAndSocket() {
     // ── Toggle sursă Power Factor ──────────────────────────────
     server.on("/toggle_pf_source", HTTP_GET, []() {
         pfUseRete = !pfUseRete;
+      g_rootHtmlDirty = true;
         server.send(200, "text/plain", pfUseRete ? "rete" : "ade");
         Serial.printf("🔄 PF source: %s\n", pfUseRete ? "Rete (Modbus)" : "ADE7758");
     });
