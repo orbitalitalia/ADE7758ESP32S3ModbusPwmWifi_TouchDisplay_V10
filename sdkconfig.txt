@@ -1,0 +1,46 @@
+# ═══════════════════════════════════════════════════════════
+# 🔒 SECURITATE ESP32-S3 (MOD DEVELOPMENT - Reversibil)
+# ═══════════════════════════════════════════════════════════
+
+# Flash Encryption (Development Mode - poate fi disable)
+CONFIG_SECURE_FLASH_ENC_ENABLED=y
+CONFIG_SECURE_FLASH_ENCRYPTION_MODE_DEVELOPMENT=y
+CONFIG_SECURE_BOOT_ALLOW_ROM_BASIC=y
+CONFIG_SECURE_FLASH_UART_BOOTLOADER_ALLOW_ENC=y
+CONFIG_SECURE_FLASH_UART_BOOTLOADER_ALLOW_DEC=y
+
+# Secure Boot V2 (Development Mode - reversibil)
+CONFIG_SECURE_BOOT_V2_ENABLED=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOTLOADER_MODE=y
+
+# App Rollback (pentru OTA safe)
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=n
+
+# Logging (păstrează pentru debug)
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+
+# JTAG (păstrează activ pentru debug)
+CONFIG_ESP32S3_DEBUG_OCDAWARE=y
+
+# Partition pentru OTA
+CONFIG_PARTITION_TABLE_CUSTOM=n
+CONFIG_PARTITION_TABLE_TWO_OTA=y
+```
+
+**Salvează și închide.**
+
+---
+
+## 📋 **ETAPA 2: Configurare Arduino IDE**
+
+### În Arduino IDE:
+```
+Tools → Board → ESP32S3 Dev Module
+Tools → Partition Scheme → Huge APP (3MB No OTA/1MB SPIFFS)
+                          SAU
+                          16M Flash (3MB APP/9.9MB FATFS)
+Tools → Upload Speed → 115200
+Tools → USB CDC On Boot → Enabled
