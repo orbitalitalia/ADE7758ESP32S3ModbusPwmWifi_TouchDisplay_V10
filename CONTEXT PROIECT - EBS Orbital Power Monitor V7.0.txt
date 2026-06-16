@@ -1,174 +1,84 @@
-📁 CONTEXT PROIECT - EBS Orbital Power Monitor V7.0
-📋 INFORMAȚII GENERALE
-Nume proiect: ESP32-S3 Power Monitor cu ADE7758
-Versiune firmware: V7.0 (test OTA V8.1)
-Hardware:
-
-ESP32-S3 Dev Module (16MB Flash, 8MB PSRAM)
-
-ADE7758 Energy Meter (SPI: CLK=8, MISO=6, MOSI=7, CS=5)
-
-OLED SSD1306 (I2C: SDA=48, SCL=47)
-
-DAC MCP4725 (I2C addr 0x60)
-
-Ethernet W5500 (SPI: MISO=12, MOSI=11, SCLK=13, CS=14, RST=9, IRQ=10)
-
-EEPROM I2C (24C256, addr 0x50) pentru NVRAM
-
-IP-uri:
-
-WiFi AP: 192.168.1.177 (întotdeauna activ)
-
-Ethernet: 192.168.1.20 (când cablu conectat)
-
-Modbus Slave: 192.168.1.246 (port 502)
-
-✅ CE FUNCȚIONEAZĂ DEJA
-Măsurători electrice (ADE7758)
-Citire VRMS (tensiune) pentru fazele A, B, C
-
-Citire IRMS (curent) pentru fazele A, B, C
-
-Citire putere activă (Watt) per fază și total
-
-Citire putere aparentă (VA) per fază și total
-
-Calcul putere reactivă (Var) per fază și total
-
-Calcul factor putere (PF) corect folosind delta WATTHR/VAHR
-
-Citire frecvență (FREQ) cu calibrare (FREQ_CAL=16.14)
-
-Filtrare EMA pentru PF (alpha=0.3) pentru stabilitate
-
-Control disipare
-PWM pe GPIO21 (canal 0, 3kHz, rezoluție 12 biți)
-
-Step2 pe GPIO16, Step3 pe GPIO17, Step4 pe GPIO18
-
-Alimentare generală stepuri pe GPIO38 (LOW=ON, HIGH=OFF)
-
-Logică automată bazată pe putere măsurată vs setpoint
-
-Control manual prin WebUI/WebSocket
-
-Network & Comunicare
-WiFi Access Point permanent (SSID: EBS-Orbital-Config, pass: 12345678)
-
-Ethernet W5500 cu IP static 192.168.1.20
-
-WebServer pe port 80 (accesibil prin ambele interfețe)
-
-WebSocket pe port 81 pentru update în timp real
-
-Modbus TCP client către 192.168.1.246:502
-
-Scriere registre: WATT (reg 2017), STAY_ALIVE (reg 2021)
-
-Citire Input Register 13 (Potenza rete) - PowerRete în kW
-
-Persistență date (NVRAM)
-Salvare setări în EEPROM I2C (24C256)
-
-Factori calibrare: voltageFactor, currentFactor
-
-Praguri disipare: prez1, prez2, prez3, prez4 (int)
-
-Setpoint (W)
-
-Energie acumulată (KWh)
-
-CT Ratio: CT_Primary, CT_Secondary
-
-OFFSET-URI în COUNTS: voltageOffsetA/B/C, currentOffsetA/B/C
-
-Flag factoryCalDone
-
-IP Modbus slave (4 bytes)
-
-Stare alimentare stepuri (stepsEnabled)
-
-Interfață utilizator
-OLED Display (actualizare la 200ms)
-
-Touch pe GPIO4 pentru control display (timeout 60 sec)
-
-WebUI complet funcțional cu toate comenzile
-
-Auto-Zero calibration din WebUI
-
-OTA Update cu autentificare (admin/orbital123)
-
-Buton restart ESP32 în WebUI
-
-OTA & Rollback
-Configurare rollback activată în sdkconfig
-
-Două partiții OTA (OTA_0 și OTA_1)
-
-Confirmare firmware după 15 sec în loop()
-
-Verificare stare partiție la boot
-
-Endpoint /update pentru upload firmware
-
-🐛 PROBLEME CUNOSCUTE / ÎN LUCRU
-Probleme active
-🔴 Modbus TCP reconectare - La căderea cablului Ethernet, sistemul detectează corect, dar reconectarea uneori eșuează
-
-🟡 Calibrare offset - Auto-zero din WebUI funcționează, dar offset-urile sunt în VOLȚI/AMPERI în UI, în timp ce în cod sunt în COUNTS - conversia trebuie verificată
-
-🟡 Putere reactivă - Calculată ca sqrt(S² - P²), dar nu este verificată cu aparatură de referință
-
-🔴 OTA cu semnătură - Codul pentru verificare RSA există dar e comentat (dev mode)
-
-Probleme rezolvate recent
-SPI timing pentru ADE7758 - delay-uri optimizate
-
-Calcul PF corect (deltaWATTHR/deltaVAHR)
-
-Safe GPIO init la boot (toate ieșirile LOW)
-
-Timeout mod manual (60 sec) - reset automat
-
-Citire PowerRete prin Modbus Input Register 13
-
-📝 STRUCTURĂ COD
-text
-├── ADE7758.cpp / .h          # Driver pentru energy meter IC
-├── ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V07.ino  # Main sketch
-├── globals.cpp / .h          # Variabile globale + funcții comune
-├── ETHClass.cpp / .h         # Driver pentru Ethernet W5500
-├── NVRAM.cpp / .h            # Persistență în EEPROM I2C
-├── WebServer.cpp / .h        # WebUI, WebSocket, OTA
-├── sdkconfig.txt             # Configurație rollback OTA
-└── README.txt                # Instrucțiuni OTA
-Task-uri RTOS
-TaskMeter (Core 1, prioritate 2) - Măsurători ADE7758 la 100ms
-
-ModbusTask (Core 1) - Comunicație Modbus TCP
-
-ModbusReconnectTask (Core 1) - Reconectare Modbus la 5s
-
-PWM_Control (Core 1, prioritate 3) - Logică disipare și control PWM
-
-OledTask (Core 1) - Actualizare display și touch
-
-🔧 CONSTANTE CRITICE
-Scale factori (din globals.cpp)
-cpp
-VRMS_SCALE_A = VRMS_SCALE_B = VRMS_SCALE_C = 0.0782f;
-IRMS_SCALE_A = IRMS_SCALE_B = IRMS_SCALE_C = 0.319243f;
-FREQ_CAL = 16.14f;  // FREQ registru 12-bit -> Hz
-Praguri eliminare zgomot
-cpp
-VOLTAGE_THRESHOLD = 10.0f;   // sub 10V afișează 0
-CURRENT_THRESHOLD = 0.5f;    // sub 0.5A afișează 0
-PF_MIN_VA = 20.0f;           // VA minim pentru calcul PF
-PF_FILTER_ALPHA = 0.3f;      // filtru EMA pentru PF
-Adrese Modbus
-cpp
-MODBUS_REG_WATT = 2017;      // Write register pentru putere totală (W)
-MODBUS_REG_STAY_ALIVE = 2021;// Keep-alive counter
-MODBUS_INPUT_POTENZA_RETE = 13; // Input register pentru PowerRete
+﻿CONTEXT PROIECT - EBS Orbital Power Monitor (actualizat 2026-06-16)
+
+1) STARE GENERALA
+- Proiect: ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10
+- Versiune firmware curenta in cod: 10.1
+- Branch git: master
+- Commit curent: d3944af (V10.1), deja push-uit pe origin/master
+- Build local valid: DA (compile OK)
+- Upload pe placa: DA (COM28)
+
+2) REGULA OPERATIONALA (IMPORTANT)
+- Intotdeauna se compileaza cu --output-dir <repo>/Build inainte de upload.
+- Upload-ul se face doar dupa regenerarea artefactelor, ca Build sa contina exact binarul flash-uit.
+- Aceasta regula este memorata si trebuie respectata la fiecare sesiune.
+
+3) FOLDERE DE REFERINTA
+- Workspace activ: Z:\Dan\ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10
+- Snapshot backup V10.0: Z:\Dan\ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.0_backup_20260616_192859
+- Snapshot separat V10.1: Z:\Dan\ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.1
+- Status actual verificat: sursele si Build sunt sincronizate intre V10 si V10.1.
+
+4) ARTEFACTE BUILD (folder Build)
+- ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.ino.bin
+- ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.ino.bootloader.bin
+- ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.ino.partitions.bin
+- ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.ino.elf
+- ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.ino.map
+- Fisier principal pentru OTA/distributie: .ino.bin
+
+5) MODIFICARI IMPORTANTE FACUTE IN ULTIMELE ITERATII
+- Webserver performance:
+  - Cache pentru root HTML (TTL) pentru a reduce reconstruirea paginii.
+  - Reducere trafic WebSocket cand nu exista client conectat.
+  - WebTask cu prioritate crescuta.
+- UI Step1 manual:
+  - Corectie overwrite din telemetrie live (input lock + protectie in modul manual).
+- Modbus parsing:
+  - Corectie parser FC04 (lungime MBAP/PDU) pentru citirea Potenza rete si Cosfi.
+- Firmware versioning:
+  - Versiunea afisata in WebUI vine strict din firmware (nu poate fi schimbata din UI).
+  - FW_VERSION definit simplu in globals.h (acum 10.1).
+- Functionare independenta fara Ethernet/Modbus:
+  - Adaugat flag global w5500Available.
+  - ModbusTask porneste mereu; ramane inactiv sigur cand nu exista Ethernet.
+  - Evitare apeluri ETH inutile cand W5500 nu este disponibil.
+  - Trimitere status ETH in WebUI din ethernetConnected (stare robusta).
+
+6) ARHITECTURA FUNCTIONALA (PE SCURT)
+- WiFi AP: trebuie sa functioneze permanent (independent de Ethernet/Modbus).
+- Ethernet W5500: optional.
+- Modbus TCP client: optional, dependent de Ethernet.
+- WebUI/WebSocket: functionale prin AP chiar daca Ethernet lipseste.
+- ADE7758 masuratori + control PWM/stepuri: independente de Modbus.
+
+7) TASK-URI RTOS (stare actuala)
+- ModbusTask
+- ModbusReconnectTask
+- PWM_Control
+- WebTask
+- TaskMeter
+- OledTask
+
+8) FISIERE CHEIE
+- ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10.ino
+- WebServer.cpp / WebServer.h
+- globals.cpp / globals.h
+- NVRAM.cpp / NVRAM.h
+- ETHClass.cpp / ETHClass.h
+
+9) CONFIGURATIE HARDWARE/UPLOAD
+- Board: esp32:esp32:esp32s3
+- Port folosit la upload: COM28
+- Toolchain validata: ESP32 core 2.0.17
+
+10) KNOWN RISKS / TODO
+- Verificare in teren a comportamentului pe uptime lung fara cablu Ethernet.
+- Curatare optionala Build pentru a pastra in git doar .bin (daca se doreste repo mai mic).
+- Optional: actualizare text banner intern care inca afiseaza "V09" in unele mesaje Serial/OLED (cosmetic).
+
+11) COMENZI STANDARD FOLOSITE
+- Compile cu artefacte in Build:
+  C:\Program Files\Arduino CLI\arduino-cli.exe compile --fqbn esp32:esp32:esp32s3 --output-dir "Z:\Dan\ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10\Build" "Z:\Dan\ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10"
+- Upload:
+  C:\Program Files\Arduino CLI\arduino-cli.exe upload -p COM28 --fqbn esp32:esp32:esp32s3 "Z:\Dan\ADE7758ESP32S3ModbusPwmWifi_TouchDisplay_V10"
