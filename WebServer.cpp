@@ -194,6 +194,7 @@ String getJavaScript() {
   String js = "<script>";
   js += "let ws;";
   js += "let step1InputFocused = false;";
+  js += "let step1InputLockUntil = 0;";
   js += "let modbusIpInputFocused = false;";
   js += "let energyInputFocused = false;";  // 🔹 nou
   js += "let reconnectAttempts = 0;";
@@ -306,9 +307,11 @@ js += "    catch(e){ console.log('WS bad JSON:', event.data); return; }";
   js += "      else { manualDiv.style.display = 'none'; }";
   js += "    }";
 
-js += "    if (!step1InputFocused && data.Step1 !== undefined) {";
+js += "    if (data.Step1 !== undefined) {";
 js += "      const input = document.getElementById('step1-value');";
-js += "      if (input) {";
+js += "      const lockActive = Date.now() < step1InputLockUntil;";
+js += "      const manualOn = data.manual === true;";
+js += "      if (input && !step1InputFocused && !lockActive && !manualOn) {";
 js += "        const pct = Math.round((data.Step1 * 100) / 4095);";
 js += "        input.value = pct;";
 js += "      }";
@@ -370,10 +373,11 @@ js += "    alert('Il valore deve essere tra 0 e 100 %');";
 js += "    return;";
 js += "  }";
 js += "  const pwmRaw = Math.round(percent * 4095 / 100);";
-// Blochează update-ul live pentru 2 secunde după send
+// Blochează update-ul live suficient cât să ajungă confirmarea din backend
 js += "  step1InputFocused = true;";
+js += "  step1InputLockUntil = Date.now() + 5000;";
 js += "  ws.send(JSON.stringify({ cmd: 'setStep1', value: pwmRaw }));";
-js += "  setTimeout(() => { step1InputFocused = false; }, 2000);";
+js += "  setTimeout(() => { step1InputFocused = false; }, 5000);";
 js += "}";
 
   js += "document.addEventListener('DOMContentLoaded', () => {";
