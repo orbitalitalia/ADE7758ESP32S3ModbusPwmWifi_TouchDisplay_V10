@@ -1115,7 +1115,8 @@ void setup() {
 
   Serial.println("\n\n");
   Serial.println("═══════════════════════════════════════════");
-  Serial.println("  🚀 FIRMWARE VERSION: v9.0  OTA");  // ← SCHIMBĂ VERSIUNEA
+  Serial.print("  🚀 FIRMWARE VERSION: v");
+  Serial.println(fwVersionString);
   Serial.println("═══════════════════════════════════════════");
   Serial.println();
 
@@ -1600,6 +1601,7 @@ Serial.printf("  LINECYC = %u (trebuie să fie 30)\n", linecyc_check);
   // 💾 ÎNCĂRCARE SETĂRI DIN NVRAM
   // ═══════════════════════════════════════════════════════════
   Serial.println("Încărcare setări din NVRAM...");
+  updateFirmwareVersionString();
   loadSettingsFromNVRAM();
   
 DBG_PRINTLN("\n🔍 TEST VRMS/IRMS get vs read24 (dupa NVRAM load)\n");

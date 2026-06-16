@@ -118,7 +118,7 @@ void sendLiveData() {
     doc["c_b"] = c_b;
     doc["c_c"] = c_c;
 
-    doc["fw_version"]  = FW_VERSION;
+    doc["fw_version"]  = fwVersionString;
     doc["pf_use_rete"] = pfUseRete;
 
     
@@ -251,6 +251,10 @@ js += "    catch(e){ console.log('WS bad JSON:', event.data); return; }";
 
   js += "    document.getElementById('eth-status').style.backgroundColor = data.eth ? 'green' : 'red';";
   js += "    document.getElementById('modbus-status').style.backgroundColor = data.modbus ? 'green' : 'red';";
+  js += "    if (data.fw_version !== undefined) {";
+  js += "      const fw = document.getElementById('fw-ver');";
+  js += "      if (fw) fw.textContent = data.fw_version;";
+  js += "    }";
 
   js += "    if (data.status && !data.target) {";  // status generic
   js += "      const el = document.getElementById('status-msg');";
@@ -479,7 +483,7 @@ js += "}";
   js += "  const ip = document.getElementById('modbus-ip').value;";
   js += "  ws.send(JSON.stringify({ cmd: 'setModbusIP', ip: ip }));";
   js += "}";
-  
+
 // ================= OTA JS (cu prompt user/pass o singura data) =================
 js += "let otaAuth = '';"; // 'Basic base64(user:pass)'
 
@@ -801,7 +805,7 @@ static void handleRoot() {
     html += "<span class='status-badge' id='status-dot' style='background-color:red'></span>";
     html += "<span id='status-msg'>Connessione in corso...</span>";
     html += "<span id='ws-connecting' style='margin-left:10px;color:#888'>Connessione WebSocket...</span>";
-    html += "<span style='margin-left:auto;color:#aaa;font-size:0.85em'>FW v<span id='fw-ver'>...</span></span>";
+    html += "<span style='margin-left:auto;color:#aaa;font-size:0.85em'>FW v<span id='fw-ver'>" + String(fwVersionString) + "</span></span>";
     html += "</div>";;
 
     // =================== MĂSURĂTORI ÎN TIMP REAL ===================

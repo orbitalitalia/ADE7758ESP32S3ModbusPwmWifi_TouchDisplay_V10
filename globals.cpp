@@ -3,6 +3,12 @@
 
 ADE7758 meter;
 
+char fwVersionString[16] = FW_VERSION;
+
+void updateFirmwareVersionString() {
+  snprintf(fwVersionString, sizeof(fwVersionString), "%s", FW_VERSION);
+}
+
 // Tensiune: 196V real, 202.74V afișat
 // new = old × (real / afisat)
 float VRMS_SCALE_A = 0.0001293f;  // = 0.0001338 × (196/202.74)

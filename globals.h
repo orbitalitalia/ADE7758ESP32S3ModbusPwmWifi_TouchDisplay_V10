@@ -13,7 +13,10 @@
 
 extern ADE7758 meter;
 
-#define FW_VERSION "9.0"
+#define FW_VERSION "10.1"
+
+extern char fwVersionString[16];
+void updateFirmwareVersionString();
 
 extern bool pfUseRete;  // true=Pf Rete, false=Pf ADE calculat
 
