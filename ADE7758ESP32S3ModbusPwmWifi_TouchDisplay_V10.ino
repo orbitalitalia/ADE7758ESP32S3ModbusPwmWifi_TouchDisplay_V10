@@ -364,12 +364,11 @@ static bool modbusReadInput16(uint16_t reg, uint16_t &outValue)
         if (respTid != tid) break;
         if (protocolId != 0x0000) break;
         if (unitId != MODBUS_UNIT_ID) break;
-        if (length != 3) break;   // 1 byte func + 1 byte count + 2 data = 4? NU.
-                                  // length exclude unitId → pentru 1 reg = 3
+        if (length != 5) break;   // unitId + function + byteCount + 2 data bytes
 
         // ===== Read PDU =====
         uint8_t pdu[4];
-        if (client.readBytes(pdu, length - 1) != (length - 1))
+        if (client.readBytes(pdu, 4) != 4)
             break;
 
         uint8_t function = pdu[0];
