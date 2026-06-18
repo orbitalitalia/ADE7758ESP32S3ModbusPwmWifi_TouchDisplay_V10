@@ -399,8 +399,15 @@ void updatePWMFromWatt(void *pvParameters)
 {
     static int pwmFiltered = 0;
     static bool prev_s2 = false, prev_s3 = false, prev_s4 = false;
+  static uint32_t overExportStartMs = 0;
+  static uint32_t underExportStartMs = 0;
+  static uint32_t lastSafetyLogMs = 0;
 
     const int PWM_STEP = 400;   // 120 rampă rapidă dar fără șoc
+  const float OVEREXPORT_MARGIN_W = 80.0f;
+  const float OVEREXPORT_CLEAR_W = 30.0f;
+  const uint32_t OVEREXPORT_DEBOUNCE_MS = 800;
+  const uint32_t OVEREXPORT_CLEAR_MS = 1500;
 
     while (1)
     {
@@ -449,6 +456,56 @@ void updatePWMFromWatt(void *pvParameters)
             if (pwmW > p1) pwmW = p1;
 
             int pwmTarget = (p1 > 0) ? (int)((pwmW / p1) * 4095.0f) : 0;
+
+            // Safety loop: validate real exported power from Modbus feedback.
+            const bool modbusFeedbackOk = ethernetConnected && modbusConnected;
+            const float gridW = PowerRete * 1000.0f;
+            const float limitW = (float)setpoint;
+            const bool overLimitNow = modbusFeedbackOk && (gridW > (limitW + OVEREXPORT_MARGIN_W));
+            const bool underClearNow = modbusFeedbackOk && (gridW < (limitW - OVEREXPORT_CLEAR_W));
+
+            if (modbusFeedbackOk) {
+              g_exportExcessW = gridW - limitW;
+            } else {
+              g_exportExcessW = 0.0f;
+              overExportStartMs = 0;
+              underExportStartMs = 0;
+              g_exportSafetyActive = false;
+            }
+
+            if (!g_exportSafetyActive && overLimitNow) {
+              if (overExportStartMs == 0) overExportStartMs = millis();
+              if ((millis() - overExportStartMs) >= OVEREXPORT_DEBOUNCE_MS) {
+                g_exportSafetyActive = true;
+                underExportStartMs = 0;
+                DBG_PRINTf("[SAFETY] Export overlimit detected: Grid=%.1fW Setpoint=%dW Excess=%.1fW\n", gridW, setpoint, g_exportExcessW);
+              }
+            } else if (!overLimitNow) {
+              overExportStartMs = 0;
+            }
+
+            if (g_exportSafetyActive && underClearNow) {
+              if (underExportStartMs == 0) underExportStartMs = millis();
+              if ((millis() - underExportStartMs) >= OVEREXPORT_CLEAR_MS) {
+                g_exportSafetyActive = false;
+                DBG_PRINTf("[SAFETY] Export back under limit: Grid=%.1fW Setpoint=%dW\n", gridW, setpoint);
+              }
+            } else if (!underClearNow) {
+              underExportStartMs = 0;
+            }
+
+            if (g_exportSafetyActive) {
+              // Fail-safe: if real power to grid is still over limit, force maximum dump.
+              s2 = true;
+              s3 = true;
+              s4 = true;
+              pwmTarget = 4095;
+
+              if (millis() - lastSafetyLogMs > 2000) {
+                lastSafetyLogMs = millis();
+                DBG_PRINTf("[SAFETY] FAIL-SAFE active: Grid=%.1fW Setpoint=%dW Excess=%.1fW\n", gridW, setpoint, g_exportExcessW);
+              }
+            }
 
             // ===== FEED-FORWARD la schimbarea stepurilor =====
             if (s2 != prev_s2) {
@@ -674,6 +731,8 @@ void OledTask(void *pvParameters) {
 void ModbusTask(void *pvParameters) {
   static uint16_t ka = 0;
   static uint32_t lastReconnectAttempt = 0;
+  static uint32_t lastWriteWatt = 0;
+  static uint32_t lastWriteKa = 0;
   static uint32_t lastReadPwrRete = 0;
   static uint32_t lastReadCosfi = 0;
 
@@ -687,43 +746,49 @@ void ModbusTask(void *pvParameters) {
         continue;
       }
 
-      bool wattSuccess = false;
-      uint16_t watt_int = (uint16_t)((uint32_t)(Watt / 100.0f) & 0xFFFF);
-      for (int retry = 0; retry < 3; retry++) {
-        if (modbusWrite16(MODBUS_REG_WATT, watt_int)) {
-          wattSuccess = true;
-          g_lastModbusTxMs = millis();
-          break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-      }
-      if (!wattSuccess) {
-        DBG_PRINTLN("❌ WATT failed → reconnecting");
-        client.stop();
-        modbusConnected = false;
-        continue;
-      }
-
-      bool kaSuccess = false;
-      for (int retry = 0; retry < 3; retry++) {
-        if (modbusWrite16(MODBUS_REG_STAY_ALIVE, ka++)) {
-          kaSuccess = true;
-          g_lastModbusTxMs = millis();
-          break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-      }
-      if (!kaSuccess) {
-        DBG_PRINTLN("❌ KA failed → reconnecting");
-        client.stop();
-        modbusConnected = false;
-        continue;
-      }
-
-      if (ka > 9999) ka = 1;
-
       const uint32_t now = millis();
-      if (now - lastReadPwrRete >= 1000) {
+
+      if (now - lastWriteWatt >= 1000) {
+        bool wattSuccess = false;
+        uint16_t watt_int = (uint16_t)((uint32_t)(Watt / 100.0f) & 0xFFFF);
+        for (int retry = 0; retry < 3; retry++) {
+          if (modbusWrite16(MODBUS_REG_WATT, watt_int)) {
+            wattSuccess = true;
+            g_lastModbusTxMs = millis();
+            break;
+          }
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (!wattSuccess) {
+          DBG_PRINTLN("❌ WATT failed → reconnecting");
+          client.stop();
+          modbusConnected = false;
+          continue;
+        }
+        lastWriteWatt = now;
+      }
+
+      if (now - lastWriteKa >= 1000) {
+        bool kaSuccess = false;
+        for (int retry = 0; retry < 3; retry++) {
+          if (modbusWrite16(MODBUS_REG_STAY_ALIVE, ka++)) {
+            kaSuccess = true;
+            g_lastModbusTxMs = millis();
+            break;
+          }
+          vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (!kaSuccess) {
+          DBG_PRINTLN("❌ KA failed → reconnecting");
+          client.stop();
+          modbusConnected = false;
+          continue;
+        }
+        if (ka > 9999) ka = 1;
+        lastWriteKa = now;
+      }
+
+      if (now - lastReadPwrRete >= 200) {
         uint16_t raw = 0;
         bool ok = false;
         for (int retry = 0; retry < 2; retry++) {
@@ -740,7 +805,7 @@ void ModbusTask(void *pvParameters) {
         }
         lastReadPwrRete = now;
 
-        if (now - lastReadCosfi >= 1000) {
+        if (now - lastReadCosfi >= 200) {
         uint16_t rawCosfi = 0;
         bool okCosfi = false;
         for (int retry = 0; retry < 2; retry++) {
@@ -763,35 +828,30 @@ void ModbusTask(void *pvParameters) {
 
     } else if (ethernetConnected && !modbusConnected) {
       if (millis() - lastReconnectAttempt >= 5000 || lastReconnectAttempt == 0) {
+        const uint16_t reconnectTimeoutMs = 200;
         DBG_PRINT("🔗 Modbus reconnect to ");
         DBG_PRINTLN(MODBUS_SLAVE_IP);
 
+        lastReconnectAttempt = millis();
         client.stop();
 
-        uint32_t startAttempt = millis();
-        bool connected = false;
-        while (millis() - startAttempt < 3000) {
-          if (client.connect(MODBUS_SLAVE_IP, MODBUS_PORT)) {
-            connected = true;
-            break;
-          }
-          vTaskDelay(pdMS_TO_TICKS(100));
-        }
+        client.setTimeout(reconnectTimeoutMs);
+        g_netBusy = true;
+        bool connected = client.connect(MODBUS_SLAVE_IP, MODBUS_PORT);
+        g_netBusy = false;
 
         if (connected) {
           DBG_PRINTLN("🎉 Modbus connected!");
           modbusConnected = true;
-          client.setTimeout(2000);
+          client.setTimeout(reconnectTimeoutMs);
           g_lastModbusTxMs = millis();
-          lastReconnectAttempt = millis();
         } else {
           DBG_PRINTLN("❌ Modbus reconnect failed");
-          lastReconnectAttempt = millis();
         }
       }
     }
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
 
@@ -930,6 +990,10 @@ void doMeasurements() {
   // Citire frecvență
   uint16_t freq_raw = meter.getFreq() & 0x0FFF;
   Frequency = (double)freq_raw / (double)FREQ_CAL;
+
+  // Keep last valid ADE values when SPI is temporarily disturbed by network reconnect activity.
+  static uint32_t lastAdeGoodMs = 0;
+  static uint32_t lastAdeWarnMs = 0;
   
   // ========== CITIRI SINCRONIZATE VRMS/IRMS ==========
   uint32_t vrmsA = meter.getVRMS_raw(PHASE_A);
@@ -948,6 +1012,22 @@ void doMeasurements() {
   int32_t rawVaA = meter.getVA(PHASE_A);
   int32_t rawVaB = meter.getVA(PHASE_B);
   int32_t rawVaC = meter.getVA(PHASE_C);
+
+  const bool suspectAdeFrame =
+      (vrmsA == 0 && vrmsB == 0 && vrmsC == 0 &&
+       irmsA == 0 && irmsB == 0 && irmsC == 0);
+
+  if (!suspectAdeFrame) {
+    lastAdeGoodMs = now_ms;
+  } else {
+    if ((now_ms - lastAdeGoodMs) < 3000) {
+      if (now_ms - lastAdeWarnMs > 2000) {
+        DBG_PRINTLN("⚠️ ADE transient frame invalid (all zero) - keeping last valid values");
+        lastAdeWarnMs = now_ms;
+      }
+      return;
+    }
+  }
 
   // ========== PROCESARE VRMS/IRMS ==========
   float CT_Ratio = (float)CT_Primary / (float)CT_Secondary;  // universala
@@ -1027,6 +1107,12 @@ float c_c_raw = iC_counts * IRMS_SCALE_BASE_C * CT_Ratio * currentFactor;
 
   VA   = VA_a + VA_b + VA_c;
   Watt = WattA + WattB + WattC;
+
+  // Fallback autonomous mode: when Modbus feedback is unavailable,
+  // expose an internal estimate so control/monitoring remains usable.
+  if (!modbusOk) {
+    PowerRete = Watt / 1000.0f;
+  }
 
   // ========== PUTERI REACTIVE ==========
   float Qa = sqrtf(fmaxf(0.0f, VA_a*VA_a - WattA*WattA));
@@ -1768,8 +1854,10 @@ DBG_PRINTf("   Offset I_A/B/C (counts): %.0f / %.0f / %.0f\n", currentOffsetA, c
   if (!ETH.beginSPI(W5500_MISO, W5500_MOSI, W5500_SCLK, W5500_CS, W5500_RST, W5500_IRQ)) {
     Serial.println("⚠️  W5500 nu a fost detectat");
     Serial.println("   Continuare doar cu WiFi AP");
+    w5500Available = false;
     ethernetConnected = false;
   } else {
+    w5500Available = true;
     Serial.println("✅ W5500 detectat - așteptare IP DHCP...");
     
     int maxTries = 4;
@@ -1810,13 +1898,14 @@ DBG_PRINTf("   Offset I_A/B/C (counts): %.0f / %.0f / %.0f\n", currentOffsetA, c
         modbusConnected = false;
       }
 
-      // Pornește task-ul Modbus doar dacă Ethernet e activ
-      Serial.println();
-      Serial.println("Pornire Modbus Task...");
-      xTaskCreatePinnedToCore(ModbusTask, "ModbusTask", 4096, NULL, 1, NULL, 0);
-      Serial.println("✅ Modbus Task activ (Core 0)");
     }
   }
+  // Task-ul Modbus rulează mereu; dacă nu există Ethernet, rămâne inactiv fără blocaje.
+  Serial.println();
+  Serial.println("Pornire Modbus Task...");
+  xTaskCreatePinnedToCore(ModbusTask, "ModbusTask", 4096, NULL, 1, NULL, 0);
+  Serial.println("✅ Modbus Task activ (Core 0)");
+
   Serial.println();
 
   // ═══════════════════════════════════════════════════════════
@@ -2006,22 +2095,27 @@ void loop() {
   // 🌐 CHECK ETHERNET LINK STATE — PHYSICAL TRUTH
   // ═══════════════════════════════════════════════════════════
   uint32_t tEth = micros();
-  bool currentLinkUp = ETH.linkUp();
-  bool currentHasIP = (ETH.localIP() != IPAddress(0,0,0,0));
+  if (w5500Available) {
+    bool currentLinkUp = ETH.linkUp();
+    bool currentHasIP = (ETH.localIP() != IPAddress(0,0,0,0));
 
-  if (currentLinkUp && currentHasIP) {
-    if (!ethernetConnected) {
-      DBG_PRINT("📡 Ethernet LINK RESTORED: ");
-      DBG_PRINTLN(ETH.localIP());
-      ethernetConnected = true;
+    if (currentLinkUp && currentHasIP) {
+      if (!ethernetConnected) {
+        DBG_PRINT("📡 Ethernet LINK RESTORED: ");
+        DBG_PRINTLN(ETH.localIP());
+        ethernetConnected = true;
+      }
+    } else {
+      if (ethernetConnected || modbusConnected) {
+        DBG_PRINTLN("🚨 PHYSICAL CABLE CUT — killing Modbus state NOW");
+        if (client.connected()) client.stop();
+        ethernetConnected = false;
+        modbusConnected = false;
+      }
     }
   } else {
-    if (ethernetConnected || modbusConnected) {
-      DBG_PRINTLN("🚨 PHYSICAL CABLE CUT — killing Modbus state NOW");
-      if (client.connected()) client.stop();
-      ethernetConnected = false;
-      modbusConnected = false;
-    }
+    ethernetConnected = false;
+    modbusConnected = false;
   }
   // profUpdate(prof.maxEthUs, micros() - tEth);
   // ═══════════════════════════════════════════════════════════

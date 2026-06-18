@@ -127,6 +127,8 @@ extern float Watt, WattA, WattB, WattC;
 extern float PowerRete; // kW - citita via Modbus Input 13 (Potenza rete)
 // Potenza rete (citita via Modbus, Input Register 13)
 extern float CosfiRete;
+extern volatile bool g_exportSafetyActive;
+extern float g_exportExcessW;
 extern float VA_a, VA_b, VA_c;
 extern float Var_a, Var_b, Var_c;
 extern float PfA, PfB, PfC, Pf;
@@ -147,6 +149,7 @@ extern SemaphoreHandle_t spiMutex;
 
 extern bool ethernetConnected;
 extern bool modbusConnected;
+extern bool w5500Available;
 extern TaskHandle_t TaskHandle_ModbusReconnect;
 extern unsigned long lastReconnectAttempt;
 

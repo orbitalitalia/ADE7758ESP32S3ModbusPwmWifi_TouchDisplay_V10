@@ -5,6 +5,7 @@
 #include "globals.h"
 #include "NVRAM.h"
 #include "ETHClass.h"
+#include "serial_log.h"
 #include <Update.h>
 
 // ═══════════════════════════════════════════════════════════
@@ -61,6 +62,11 @@ static unsigned long lastGPIOInitAttempt = 0;
 static const unsigned long GPIO_INIT_DELAY = 10000; // 10 secunde după pornire
 
 bool websocketConnected = false;
+static uint16_t wsClientCount = 0;
+
+static void webLog(const String& msg) {
+  SerialLogger.add("[" + String(millis()) + " ms] " + msg + "\n");
+}
 
 static String g_rootHtmlCache;
 static uint32_t g_rootHtmlBuiltMs = 0;
@@ -107,13 +113,15 @@ static bool initializePin(int pin, bool currentState) {
 
 // Trimite periodic date JSON către client
 void sendLiveData() {
-  if (!websocketConnected) return;
+    StaticJsonDocument<1024> doc;
 
-    StaticJsonDocument<512> doc;
+    const float va = isfinite((float)v_a) ? (float)v_a : 0.0f;
+    const float vb = isfinite((float)v_b) ? (float)v_b : 0.0f;
+    const float vc = isfinite((float)v_c) ? (float)v_c : 0.0f;
 
-    doc["v_a"] = v_a;
-    doc["v_b"] = v_b;
-    doc["v_c"] = v_c;
+    doc["v_a"] = va;
+    doc["v_b"] = vb;
+    doc["v_c"] = vc;
     doc["c_a"] = c_a;
     doc["c_b"] = c_b;
     doc["c_c"] = c_c;
@@ -131,6 +139,7 @@ doc["p_c"] = WattC / 1000.0f;
     // Puterea totală: suma fazelor, ca pe display!
 doc["power"] = Watt / 1000.0f;
     doc["power_rete"] = PowerRete;
+  doc["power_rete_source"] = (ethernetConnected && modbusConnected) ? "Modbus" : "ADE7758 (stima)";
     doc["energy"] = KWh;
     doc["freq"] = Frequency;
     doc["pf"]           = Pf;
@@ -144,9 +153,11 @@ doc["power"] = Watt / 1000.0f;
     doc["stepsEnabled"] = stepsEnabled;  // 🔹 Stare alimentare stepuri
    
     doc["connected"] = websocketConnected;
-    doc["eth"] = ETH.linkUp();
+    doc["eth"] = ethernetConnected;
     doc["modbus"] = modbusConnected;
     doc["modbus_ip"] = MODBUS_SLAVE_IP.toString();  // ✅ Invia IP corrente
+    doc["export_safety_active"] = g_exportSafetyActive;
+    doc["export_excess_w"] = g_exportExcessW;
 
     String output;
     serializeJson(doc, output);
@@ -183,6 +194,7 @@ static String getCommonStyles() {
     styles += ".measurement-label{font-size:0.8rem;color:#6c757d}";
     styles += ".alert-info{background:#cfe2ff;border-left:4px solid #0d6efd;padding:0.75rem;border-radius:0.25rem;margin-bottom:1rem}";
     styles += ".alert-warning{background:#fff3cd;border-left:4px solid #ffc107;padding:0.75rem;border-radius:0.25rem;margin-bottom:1rem}";
+    styles += ".logs-box{display:none;white-space:pre-wrap;background:#111;color:#f1f1f1;padding:0.75rem;border-radius:0.25rem;max-height:260px;overflow:auto;font-family:Consolas,monospace;font-size:0.85rem}";
     styles += "@media (max-width: 768px){.grid-container{grid-template-columns:1fr}.measurement-grid{grid-template-columns:1fr}}";
     styles += "</style>";
     return styles;
@@ -197,11 +209,46 @@ String getJavaScript() {
   js += "let step1InputLockUntil = 0;";
   js += "let modbusIpInputFocused = false;";
   js += "let energyInputFocused = false;";  // 🔹 nou
+  js += "let logsVisible = false;";
   js += "let reconnectAttempts = 0;";
-  js += "let maxReconnectAttempts = 50;";
+  js += "let maxReconnectAttempts = 0;";
+  js += "const isNum = (v) => (typeof v === 'number' && isFinite(v));";
+  js += "let lastWsMessageMs = Date.now();";
+  js += "let wsConnectStartMs = 0;";
+
+  js += "function refreshLogs() {";
+  js += "  fetch('/logs', {cache:'no-store'})";
+  js += "    .then(r => r.text())";
+  js += "    .then(t => {";
+  js += "      const box = document.getElementById('logs-panel');";
+  js += "      if (!box) return;";
+  js += "      box.textContent = t || 'Nessun log disponibile.';";
+  js += "      box.scrollTop = box.scrollHeight;";
+  js += "    })";
+  js += "    .catch(() => {";
+  js += "      const box = document.getElementById('logs-panel');";
+  js += "      if (box) box.textContent = 'Errore lettura log.';";
+  js += "    });";
+  js += "}";
+
+  js += "function toggleLogsPanel() {";
+  js += "  const box = document.getElementById('logs-panel');";
+  js += "  const btn = document.getElementById('logsToggleBtn');";
+  js += "  if (!box || !btn) return;";
+  js += "  logsVisible = !logsVisible;";
+  js += "  box.style.display = logsVisible ? 'block' : 'none';";
+  js += "  btn.textContent = logsVisible ? 'Ascunde Loguri' : 'Arata Loguri';";
+  js += "  if (logsVisible) refreshLogs();";
+  js += "}";
+
+  js += "function clearLogs() {";
+  js += "  fetch('/logs/clear', {method:'POST'})";
+  js += "    .then(() => refreshLogs())";
+  js += "    .catch(() => alert('Eroare clear log'));";
+  js += "}";
 
   js += "function connectWebSocket() {";
-  js += "  if (reconnectAttempts >= maxReconnectAttempts) {";
+  js += "  if (maxReconnectAttempts > 0 && reconnectAttempts >= maxReconnectAttempts) {";
   js += "    console.log('❌ Troppi tentativi WebSocket, interruzione...');";
   js += "    document.getElementById('status-dot').style.backgroundColor = 'red';";
   js += "    document.getElementById('status-msg').textContent = 'Connessione fallita';";
@@ -209,6 +256,7 @@ String getJavaScript() {
   js += "  }";
   
   js += "  ws = new WebSocket('ws://' + location.hostname + ':81');";
+  js += "  wsConnectStartMs = Date.now();";
 
   js += "  ws.onopen = () => {";
   js += "    console.log('✅ WebSocket connesso!');";
@@ -217,6 +265,7 @@ String getJavaScript() {
   js += "    if (el) el.style.display = 'none';";
   js += "    document.getElementById('status-msg').textContent = 'Connesso';";
   js += "    reconnectAttempts = 0;";
+  js += "    lastWsMessageMs = Date.now();";
   js += "  };";
 
   js += "  ws.onerror = (error) => {";
@@ -230,6 +279,7 @@ String getJavaScript() {
   js += "    if (el) el.style.display = 'inline-block';";
   js += "    document.getElementById('status-msg').textContent = 'Riconnessione...';";
   js += "    reconnectAttempts++;";
+  js += "    wsConnectStartMs = 0;";
   js += "    let delay = Math.min(100 + (reconnectAttempts * 50), 2000);";
   js += "    setTimeout(() => {";
   js += "      console.log('🔄 Nuovo tentativo WebSocket... tentativo', reconnectAttempts);";
@@ -238,6 +288,8 @@ String getJavaScript() {
   js += "  };";
 
   js += "  ws.onmessage = (event) => {";
+  js += "    try {";
+  js += "    lastWsMessageMs = Date.now();";
   js += "    let data;";
 js += "    try { data = JSON.parse(event.data); }";
 js += "    catch(e){ console.log('WS bad JSON:', event.data); return; }";
@@ -262,18 +314,19 @@ js += "    catch(e){ console.log('WS bad JSON:', event.data); return; }";
   js += "        setTimeout(() => { el.textContent = 'Pronto'; el.style.color = '#555'; }, 3000); }";
   js += "    }";
 
-  js += "    if (data.v_a !== undefined) document.getElementById('v_a').textContent = data.v_a.toFixed(2) + ' V';";
-  js += "    if (data.v_b !== undefined) document.getElementById('v_b').textContent = data.v_b.toFixed(2) + ' V';";
-  js += "    if (data.v_c !== undefined) document.getElementById('v_c').textContent = data.v_c.toFixed(2) + ' V';";
-  js += "    if (data.c_a !== undefined) document.getElementById('c_a').textContent = data.c_a.toFixed(2) + ' A';";
-  js += "    if (data.c_b !== undefined) document.getElementById('c_b').textContent = data.c_b.toFixed(2) + ' A';";
-  js += "    if (data.c_c !== undefined) document.getElementById('c_c').textContent = data.c_c.toFixed(2) + ' A';";
+  js += "    if (isNum(data.v_a)) document.getElementById('v_a').textContent = data.v_a.toFixed(2) + ' V';";
+  js += "    if (isNum(data.v_b)) document.getElementById('v_b').textContent = data.v_b.toFixed(2) + ' V';";
+  js += "    if (isNum(data.v_c)) document.getElementById('v_c').textContent = data.v_c.toFixed(2) + ' V';";
+  js += "    if (isNum(data.c_a)) document.getElementById('c_a').textContent = data.c_a.toFixed(2) + ' A';";
+  js += "    if (isNum(data.c_b)) document.getElementById('c_b').textContent = data.c_b.toFixed(2) + ' A';";
+  js += "    if (isNum(data.c_c)) document.getElementById('c_c').textContent = data.c_c.toFixed(2) + ' A';";
 
-  js += "    if (data.power !== undefined)";
+  js += "    if (isNum(data.power))";
   js += "      document.getElementById('power').textContent = data.power.toFixed(2) + ' kW';";
-  js += "      if (data.power_rete !== undefined) { const el = document.getElementById('power-rete'); if (el) el.textContent = data.power_rete.toFixed(2) + ' kW'; }";
+  js += "      if (isNum(data.power_rete)) { const el = document.getElementById('power-rete'); if (el) el.textContent = data.power_rete.toFixed(2) + ' kW'; }";
+  js += "      if (data.power_rete_source !== undefined) { const src = document.getElementById('power-rete-src'); if (src) src.textContent = data.power_rete_source; }";
 
-  js += "    if (data.energy !== undefined) {";
+  js += "    if (isNum(data.energy)) {";
   js += "      document.getElementById('energy').textContent = data.energy.toFixed(2) + ' kWh';";
   js += "      if (!energyInputFocused) {";
   js += "        const energyInput = document.getElementById('energySet');";
@@ -281,10 +334,10 @@ js += "    catch(e){ console.log('WS bad JSON:', event.data); return; }";
   js += "      }";
   js += "    }";
 
-  js += "    if (data.freq !== undefined)";
+  js += "    if (isNum(data.freq))";
   js += "      document.getElementById('freq').textContent = data.freq.toFixed(1) + ' Hz';";
 
-  js += "    if (data.pf !== undefined && data.cosfi_rete !== undefined) {";
+  js += "    if (isNum(data.pf) && isNum(data.cosfi_rete)) {";
   js += "      const modbusOk = data.modbus === true;";
   js += "      const useRete = modbusOk && data.pf_use_rete;";
   js += "      const pfVal   = useRete ? data.cosfi_rete : data.pf;";
@@ -301,9 +354,9 @@ js += "    catch(e){ console.log('WS bad JSON:', event.data); return; }";
   js += "    fetch('/toggle_pf_source').then(r=>r.text()).then(t=>console.log('PF src:',t));";
   js += "  }";
 
-  js += "    if (data.p_a !== undefined) document.getElementById('p_a').textContent = data.p_a.toFixed(2) + ' kW';";
-  js += "    if (data.p_b !== undefined) document.getElementById('p_b').textContent = data.p_b.toFixed(2) + ' kW';";
-  js += "    if (data.p_c !== undefined) document.getElementById('p_c').textContent = data.p_c.toFixed(2) + ' kW';";
+  js += "    if (isNum(data.p_a)) document.getElementById('p_a').textContent = data.p_a.toFixed(2) + ' kW';";
+  js += "    if (isNum(data.p_b)) document.getElementById('p_b').textContent = data.p_b.toFixed(2) + ' kW';";
+  js += "    if (isNum(data.p_c)) document.getElementById('p_c').textContent = data.p_c.toFixed(2) + ' kW';";
 
   js += "    if (data.manual !== undefined) {";
   js += "      const manualDiv = document.getElementById('manual-indicator');";
@@ -341,6 +394,7 @@ js += "    }";
   js += "      const ipInput = document.getElementById('modbus-ip');";
   js += "      if (ipInput) ipInput.value = data.modbus_ip;";
   js += "    }";
+  js += "    } catch(e) { console.log('WS handler error:', e); }";
   
   js += "  };";
   js += "}";
@@ -404,6 +458,20 @@ js += "}";
   js += "  }";
 
   js += "  connectWebSocket();";
+  js += "  setInterval(() => {";
+  js += "    const staleMs = Date.now() - lastWsMessageMs;";
+  js += "    if (!ws) return;";
+  js += "    if (ws.readyState === WebSocket.CONNECTING && wsConnectStartMs > 0 && (Date.now() - wsConnectStartMs) > 2500) {";
+  js += "      console.log('⚠️ WS connect timeout, forcing reconnect...');";
+  js += "      try { ws.close(); } catch(_) {}";
+  js += "      return;";
+  js += "    }";
+  js += "    if (ws.readyState === WebSocket.OPEN && staleMs > 3000) {";
+  js += "      console.log('⚠️ WS stale stream, forcing reconnect...');";
+  js += "      try { ws.close(); } catch(_) {}";
+  js += "    }";
+  js += "  }, 1000);";
+  js += "  setInterval(() => { if (logsVisible) refreshLogs(); }, 1500);";
   js += "});";
 
   // ✅ Auto-Zero offset
@@ -820,7 +888,7 @@ static void handleRoot() {
     html += "</table>";
     html += "<div style='margin-top:1rem'>";
     html += "<strong>Potenza totale:</strong> <span class='value-display' id='power'>0 kW</span><br>";
-    html += "<strong>Potenza rete:</strong> <span class='value-display' id='power-rete'>0 kW</span><br>";
+    html += "<strong>Potenza rete:</strong> <span class='value-display' id='power-rete'>0 kW</span> <span id='power-rete-src' style='font-size:0.8em;color:#666'>(n/a)</span><br>";
     html += "<strong>Energia:</strong> <span class='value-display' id='energy'>0 kWh</span><br>";
     html += "<strong>Frequenza:</strong> <span id='freq'>50.0 Hz</span><br>";
     html += "<strong>Fattore di potenza:</strong> <span id='pf'>1.000</span> ";
@@ -863,6 +931,16 @@ static void handleRoot() {
     html += "<input type='text' id='modbus-ip' class='form-control' value='" + MODBUS_SLAVE_IP.toString() + "'>";
     html += "<button class='btn' onclick='setModbusIP()'>Salva IP</button>";
     html += "</div></div>";
+
+    html += "<div class='card'>";
+    html += "<div class='card-header'>Loguri Sistem</div>";
+    html += "<div style='margin-bottom:0.75rem'>";
+    html += "<button class='btn' id='logsToggleBtn' onclick='toggleLogsPanel()'>Arata Loguri</button>";
+    html += "<button class='btn' onclick='refreshLogs()'>Refresh</button>";
+    html += "<button class='btn btn-danger' onclick='clearLogs()'>Clear</button>";
+    html += "</div>";
+    html += "<pre id='logs-panel' class='logs-box'>Nessun log disponibile.</pre>";
+    html += "</div>";
     
     html += "</div>"; // închide grid-container
 	
@@ -1029,6 +1107,7 @@ void handleWebSocketMessage(uint8_t num, uint8_t *payload, size_t length) {
 
     if (!doc.containsKey("cmd")) return;
     String cmd = doc["cmd"].as<String>();
+    webLog("WS cmd from client " + String(num) + ": " + cmd);
 
     // 🔹 Toggle Step2/3/4 în modul manual
     if (cmd == "toggle") {
@@ -1195,6 +1274,7 @@ if (doc.containsKey("voltageOffsetC")) {
             KWh = doc["energy"].as<float>();
             saveSettingsToNVRAM();
           g_rootHtmlDirty = true;
+            webLog("Energy set to " + String(KWh, 3) + " kWh");
             webSocket.sendTXT(num, "{\"status\":\"Energia impostata\",\"target\":\"energy\"}");
         }
 
@@ -1202,6 +1282,7 @@ if (doc.containsKey("voltageOffsetC")) {
     } else if (cmd == "setManualMode") {
         manualControlEnabled = doc["enabled"].as<bool>();
         manualControlTimeout = millis();
+      webLog(String("Manual mode ") + (manualControlEnabled ? "ENABLED" : "DISABLED"));
         
         if (!manualControlEnabled) {
             Step1 = 0;
@@ -1223,6 +1304,7 @@ if (doc.containsKey("voltageOffsetC")) {
         updateStepGPIOs();  // Aplică imediat schimbarea
         saveSettingsToNVRAM();  // Salvează în NVRAM pentru persistență
         g_rootHtmlDirty = true;
+      webLog(String("Steps power ") + (stepsEnabled ? "ENABLED" : "DISABLED"));
         
         String s = stepsEnabled ? "Alimentare stepuri ATTIVATA" : "Alimentare stepuri DISATTIVATA";
         webSocket.sendTXT(num, "{\"status\":\"" + s + "\",\"target\":\"stepsEnable\"}");
@@ -1233,6 +1315,7 @@ if (doc.containsKey("voltageOffsetC")) {
             String ipStr = doc["ip"].as<String>();
             if (MODBUS_SLAVE_IP.fromString(ipStr)) {
                 saveModbusIPToNVRAM();  // ✅ scrie în EEPROM
+              webLog("Modbus IP updated to " + ipStr);
 
                 if (client.connected()) {
                     client.stop();
@@ -1252,11 +1335,15 @@ if (doc.containsKey("voltageOffsetC")) {
 void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length) {
     switch (type) {
         case WStype_CONNECTED:
-            websocketConnected = true;
+      wsClientCount++;
+      websocketConnected = (wsClientCount > 0);
+            webLog("WS client connected: " + String(num));
             Serial.printf("[WebSocket] Client %u connesso\n", num);
             break;
         case WStype_DISCONNECTED:
-            websocketConnected = false;
+      if (wsClientCount > 0) wsClientCount--;
+      websocketConnected = (wsClientCount > 0);
+            webLog("WS client disconnected: " + String(num));
             Serial.printf("[WebSocket] Client %u disconnesso\n", num);
             break;
         case WStype_TEXT:
@@ -1272,7 +1359,7 @@ void handleWebClient() {
     webSocket.loop();
 
     static unsigned long lastSend = 0;
-    if (millis() - lastSend > 500) {
+    if (millis() - lastSend >= 200) {
       if (websocketConnected) sendLiveData();
         lastSend = millis();
     }
@@ -1307,12 +1394,24 @@ void loopWebSocket() {
 }
 
 void initWebServerAndSocket() {
+  SerialLogger.begin(8192);
+  webLog("Web server init");
+
     const char* hdrKeys[] = { "X-OTA-CONFIRM" };
     server.collectHeaders(hdrKeys, 1);
 
     server.on("/", HTTP_GET, handleRoot);
     server.onNotFound(handleNotFound);
     server.on("/ota_status", HTTP_GET, handleOTAStatus);
+  server.on("/logs", HTTP_GET, []() {
+    server.sendHeader("Cache-Control", "no-store");
+    server.send(200, "text/plain; charset=utf-8", SerialLogger.get());
+  });
+  server.on("/logs/clear", HTTP_POST, []() {
+    SerialLogger.clear();
+    webLog("Logs cleared from WebUI");
+    server.send(200, "text/plain", "OK");
+  });
 
     server.on("/update", HTTP_POST,
         []() { if (!otaAuthOrFail()) return; },

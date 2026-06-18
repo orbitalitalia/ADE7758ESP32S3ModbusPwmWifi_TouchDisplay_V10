@@ -80,6 +80,7 @@ volatile uint32_t g_modbusJustConnectedAt = 0;
 
 bool ethernetConnected = false;
 bool modbusConnected   = false;
+bool w5500Available    = false;
 IPAddress MODBUS_SLAVE_IP(192,168,1,246);
 
 TaskHandle_t TaskHandle_ModbusReconnect;
@@ -98,6 +99,8 @@ bool Step2 = false, Step3 = false, Step4 = false;
 float Watt = 0;
 float PowerRete = 0.0f; // kW - Modbus Input 13 (Potenza rete)
 float CosfiRete = 1.0f;
+volatile bool g_exportSafetyActive = false;
+float g_exportExcessW = 0.0f;
 
 bool manualStep2 = false;
 bool manualStep3 = false;
