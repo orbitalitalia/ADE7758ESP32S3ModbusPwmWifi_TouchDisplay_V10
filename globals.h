@@ -62,8 +62,11 @@ extern unsigned long lastModbusReconnectAttempt;
 extern bool modbusReconnectPending;
 
 // --- Modbus timeouts ---
+#ifndef MODBUS_RX_TIMEOUT_MS
+#define MODBUS_RX_TIMEOUT_MS 3000   // valid RX required in last 3s for UI green
+#endif
 #ifndef MODBUS_IDLE_MS
-#define MODBUS_IDLE_MS 3000   // 3s fără trafic = considerăm Modbus "căzut"
+#define MODBUS_IDLE_MS MODBUS_RX_TIMEOUT_MS
 #endif
 
 // --- Modbus timeouts/status ---

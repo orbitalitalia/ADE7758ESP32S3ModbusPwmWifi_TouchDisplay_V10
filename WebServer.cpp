@@ -68,6 +68,11 @@ static void webLog(const String& msg) {
   SerialLogger.add("[" + String(millis()) + " ms] " + msg + "\n");
 }
 
+void webUiLogMessage(const char* msg) {
+  if (!msg) return;
+  webLog(String(msg));
+}
+
 static String g_rootHtmlCache;
 static uint32_t g_rootHtmlBuiltMs = 0;
 static bool g_rootHtmlDirty = true;
@@ -114,6 +119,25 @@ static bool initializePin(int pin, bool currentState) {
 // Trimite periodic date JSON către client
 void sendLiveData() {
     StaticJsonDocument<1024> doc;
+    static bool lastLoggedModbusUiOk = false;
+    static bool firstLoggedModbusUi = true;
+
+  bool modbusUiOk =
+    ethernetConnected &&
+    ETH.linkUp() &&
+    modbusConnected &&
+    (millis() - g_lastModbusRxMs < MODBUS_RX_TIMEOUT_MS);
+
+    if (firstLoggedModbusUi || modbusUiOk != lastLoggedModbusUiOk) {
+      firstLoggedModbusUi = false;
+      lastLoggedModbusUiOk = modbusUiOk;
+
+      if (modbusUiOk) {
+        webUiLogMessage("🟢 Modbus connected");
+      } else {
+        webUiLogMessage("🔴 Modbus disconnected");
+      }
+    }
 
     const float va = isfinite((float)v_a) ? (float)v_a : 0.0f;
     const float vb = isfinite((float)v_b) ? (float)v_b : 0.0f;
@@ -139,12 +163,12 @@ doc["p_c"] = WattC / 1000.0f;
     // Puterea totală: suma fazelor, ca pe display!
 doc["power"] = Watt / 1000.0f;
     doc["power_rete"] = PowerRete;
-  doc["power_rete_source"] = (ethernetConnected && modbusConnected) ? "Modbus" : "ADE7758 (stima)";
+  doc["power_rete_source"] = modbusUiOk ? "Modbus" : "ADE7758 (stima)";
     doc["energy"] = KWh;
     doc["freq"] = Frequency;
     doc["pf"]           = Pf;
     doc["cosfi_rete"]   = CosfiRete;
-    doc["cosfi_source"] = (ethernetConnected && modbusConnected && pfUseRete) ? "Modbus" : "ADE7758";
+    doc["cosfi_source"] = (modbusUiOk && pfUseRete) ? "Modbus" : "ADE7758";
     doc["Step1"] = Step1;
     doc["Step2"] = Step2;
     doc["Step3"] = Step3;
@@ -154,7 +178,7 @@ doc["power"] = Watt / 1000.0f;
    
     doc["connected"] = websocketConnected;
     doc["eth"] = ethernetConnected;
-    doc["modbus"] = modbusConnected;
+    doc["modbus"] = modbusUiOk;
     doc["modbus_ip"] = MODBUS_SLAVE_IP.toString();  // ✅ Invia IP corrente
     doc["export_safety_active"] = g_exportSafetyActive;
     doc["export_excess_w"] = g_exportExcessW;

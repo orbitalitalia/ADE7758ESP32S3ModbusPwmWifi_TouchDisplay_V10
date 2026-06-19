@@ -276,8 +276,7 @@ void factoryResetCalibration() {
 
 // =================== MODBUS WRITE (FC06) ===================
 static bool modbusWrite16(uint16_t reg, uint16_t value) {
-  if (!ETH.linkUp() || ETH.localIP() == IPAddress(0,0,0,0)) return false;
-  if (!client.connected()) return false;
+  if (!ethernetConnected || !client.connected()) return false;
 
   if (g_modbusMutex && xSemaphoreTake(g_modbusMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
     return false;
@@ -293,20 +292,23 @@ static bool modbusWrite16(uint16_t reg, uint16_t value) {
     (uint8_t)(value>>8),(uint8_t)(value&0xFF)
   };
 
-  client.setTimeout(1000);
+  client.setTimeout(300);
   int wrote = client.write(req, sizeof(req));
   bool success = (wrote == (int)sizeof(req));
 
-  unsigned long startDrain = millis();
-  while (client.available() > 0 && (millis() - startDrain < 500)) {
-    client.read();
+  if (!success) {
+    while (client.available() > 0) client.read();
+    client.stop();
+    modbusConnected = false;
   }
+
+  while (client.available() > 0) client.read();
 
   if (g_modbusMutex) xSemaphoreGive(g_modbusMutex);
 
   if (!success) {
     DBG_PRINTLN("⚠️ Modbus write failed");
-    client.stop();
+    return false;
   }
 
   return success;
@@ -315,14 +317,15 @@ static bool modbusWrite16(uint16_t reg, uint16_t value) {
 // =================== MODBUS READ INPUT (FC04) ===================
 static bool modbusReadInput16(uint16_t reg, uint16_t &outValue)
 {
-    if (!ethernetConnected) return false;
-    if (!client.connected()) return false;
+  if (!ethernetConnected || !client.connected()) return false;
 
     if (g_modbusMutex &&
-        xSemaphoreTake(g_modbusMutex, pdMS_TO_TICKS(200)) != pdTRUE)
+    xSemaphoreTake(g_modbusMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
         return false;
+  }
 
     bool success = false;
+    bool ioFailed = false;
 
     do
     {
@@ -340,15 +343,19 @@ static bool modbusReadInput16(uint16_t reg, uint16_t &outValue)
             0x00, 0x01                  // 1 register
         };
 
-        client.setTimeout(1000);
+        client.setTimeout(300);
 
-        if (client.write(req, sizeof(req)) != sizeof(req))
+        if (client.write(req, sizeof(req)) != sizeof(req)) {
+          ioFailed = true;
             break;
+        }
 
         // ===== Read MBAP =====
         uint8_t mbap[7];
-        if (client.readBytes(mbap, 7) != 7)
+        if (client.readBytes(mbap, 7) != 7) {
+          ioFailed = true;
             break;
+        }
 
         uint16_t respTid =
             ((uint16_t)mbap[0] << 8) | mbap[1];
@@ -368,8 +375,10 @@ static bool modbusReadInput16(uint16_t reg, uint16_t &outValue)
 
         // ===== Read PDU =====
         uint8_t pdu[4];
-        if (client.readBytes(pdu, 4) != 4)
+        if (client.readBytes(pdu, 4) != 4) {
+          ioFailed = true;
             break;
+        }
 
         uint8_t function = pdu[0];
         uint8_t byteCount = pdu[1];
@@ -384,9 +393,12 @@ static bool modbusReadInput16(uint16_t reg, uint16_t &outValue)
 
     } while (false);
 
-    if (!success)
-    {
+    if (!success) {
         while (client.available()) client.read();
+      if (ioFailed) {
+        client.stop();
+        modbusConnected = false;
+      }
     }
 
     if (g_modbusMutex) xSemaphoreGive(g_modbusMutex);
@@ -730,93 +742,237 @@ void OledTask(void *pvParameters) {
 // ==================== Task Modbus ====================
 void ModbusTask(void *pvParameters) {
   static uint16_t ka = 0;
+  static uint8_t modbusFailCount = 0;
   static uint32_t lastReconnectAttempt = 0;
   static uint32_t lastWriteWatt = 0;
   static uint32_t lastWriteKa = 0;
   static uint32_t lastReadPwrRete = 0;
   static uint32_t lastReadCosfi = 0;
+  static bool lastReportedModbusState = false;
+  static bool lastModbusUiOk = false;
 
   for (;;) {
-    if (ethernetConnected && modbusConnected) {
-      if (!client.connected()) {
-        DBG_PRINTLN("⚠️ Modbus dead → reconnecting");
-        client.stop();
-        modbusConnected = false;
-        vTaskDelay(pdMS_TO_TICKS(500));
-        continue;
+    const bool socketOk = client.connected();
+    auto syncModbusUiState = [&]() {
+      bool modbusUiOk =
+          ethernetConnected &&
+          ETH.linkUp() &&
+          modbusConnected &&
+          (millis() - g_lastModbusRxMs < MODBUS_RX_TIMEOUT_MS);
+
+      if (modbusUiOk != lastModbusUiOk) {
+        lastModbusUiOk = modbusUiOk;
+        sendLiveData();
       }
+    };
+
+    auto markModbusValidatedRx = [&]() {
+      const uint32_t nowRx = millis();
+      g_lastModbusRxMs = nowRx;
+      if (!modbusConnected) {
+        modbusConnected = true;
+        sendLiveData();
+      }
+    };
+
+    // 2) Sync UI flag to real socket state before any Modbus I/O.
+    if (modbusConnected && !socketOk) {
+      DBG_PRINTLN("⚠️ Modbus sync: socket lost -> modbusConnected=false");
+      modbusConnected = false;
+      sendLiveData();
+      lastReportedModbusState = modbusConnected;
+    }
+    syncModbusUiState();
+
+    // 1) Ethernet not OK: force close and leave current cycle.
+    if (!ethernetConnected) {
+      client.stop();
+      DBG_PRINTf("[MB] ETH NOK | ethernetConnected=%d linkUp=%d ip=%s socket=%d modbusConnected=%d\n",
+                 (int)ethernetConnected,
+                 (int)ETH.linkUp(),
+                 ETH.localIP().toString().c_str(),
+                 (int)client.connected(),
+                 (int)modbusConnected);
+      modbusConnected = false;
+      modbusFailCount = 0;
+
+      if (lastReportedModbusState != modbusConnected) {
+        lastReportedModbusState = modbusConnected;
+        sendLiveData();
+      }
+      syncModbusUiState();
+
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    // 3) Reconnect based on real socket state (independent from modbusConnected flag).
+    if (ethernetConnected && !client.connected()) {
+      DBG_PRINTf("[MB] RECONNECT BRANCH | ethernetConnected=%d linkUp=%d ip=%s socket=%d modbusConnected=%d\n",
+                 (int)ethernetConnected,
+                 (int)ETH.linkUp(),
+                 ETH.localIP().toString().c_str(),
+                 (int)client.connected(),
+                 (int)modbusConnected);
+
+      modbusConnected = false;
+
+      if (lastReportedModbusState != modbusConnected) {
+        lastReportedModbusState = modbusConnected;
+        sendLiveData();
+      }
+
+      const uint32_t nowReconnect = millis();
+      if (lastReconnectAttempt == 0 || (nowReconnect - lastReconnectAttempt >= 3000)) {
+        const uint16_t reconnectTimeoutMs = 300;
+        DBG_PRINT("🔗 Modbus reconnect to ");
+        DBG_PRINTLN(MODBUS_SLAVE_IP);
+
+        lastReconnectAttempt = nowReconnect;
+        client.stop();
+
+        client.setTimeout(reconnectTimeoutMs);
+        g_netBusy = true;
+        bool connected = client.connect(MODBUS_SLAVE_IP, MODBUS_PORT);
+        g_netBusy = false;
+        DBG_PRINTf("[MB] CONNECT RESULT=%d | ethernetConnected=%d linkUp=%d ip=%s socket=%d modbusConnected=%d\n",
+                   (int)connected,
+                   (int)ethernetConnected,
+                   (int)ETH.linkUp(),
+                   ETH.localIP().toString().c_str(),
+                   (int)client.connected(),
+                   (int)modbusConnected);
+
+        if (connected) {
+          // Socket is up, but Modbus is considered valid only after first valid RX.
+          DBG_PRINTLN("🎉 Modbus socket connected (awaiting valid Modbus response)");
+          modbusConnected = false;
+          modbusFailCount = 0;
+          client.setTimeout(300);
+          g_lastModbusTxMs = millis();
+          g_lastModbusRxMs = 0;
+          lastWriteWatt = g_lastModbusTxMs;
+          lastWriteKa = g_lastModbusTxMs;
+          lastReadPwrRete = g_lastModbusTxMs;
+          lastReadCosfi = g_lastModbusTxMs;
+          syncModbusUiState();
+          sendLiveData();
+          lastReportedModbusState = modbusConnected;
+        } else {
+          DBG_PRINTLN("❌ Modbus reconnect failed");
+          modbusConnected = false;
+          syncModbusUiState();
+          sendLiveData();
+          lastReportedModbusState = modbusConnected;
+        }
+      }
+
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    // 4) State-change UI sync (safety net for any future transitions).
+    if (lastReportedModbusState != modbusConnected) {
+      lastReportedModbusState = modbusConnected;
+      sendLiveData();
+    }
+
+    if (modbusConnected && (millis() - g_lastModbusRxMs > MODBUS_RX_TIMEOUT_MS)) {
+      DBG_PRINTLN("❌ Modbus RX timeout -> disconnected");
+      client.stop();
+      modbusConnected = false;
+      syncModbusUiState();
+      sendLiveData();
+      lastReportedModbusState = modbusConnected;
+      vTaskDelay(pdMS_TO_TICKS(100));
+      continue;
+    }
+
+    if (client.connected()) {
 
       const uint32_t now = millis();
 
       if (now - lastWriteWatt >= 1000) {
-        bool wattSuccess = false;
         uint16_t watt_int = (uint16_t)((uint32_t)(Watt / 100.0f) & 0xFFFF);
-        for (int retry = 0; retry < 3; retry++) {
-          if (modbusWrite16(MODBUS_REG_WATT, watt_int)) {
-            wattSuccess = true;
-            g_lastModbusTxMs = millis();
-            break;
-          }
-          vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        if (!wattSuccess) {
+        if (!modbusWrite16(MODBUS_REG_WATT, watt_int)) {
           DBG_PRINTLN("❌ WATT failed → reconnecting");
-          client.stop();
-          modbusConnected = false;
+          modbusFailCount++;
+          if (modbusFailCount >= 5) {
+            client.stop();
+            modbusConnected = false;
+            modbusFailCount = 0;
+            if (lastReportedModbusState != modbusConnected) {
+              lastReportedModbusState = modbusConnected;
+              sendLiveData();
+            }
+          }
           continue;
         }
+        modbusFailCount = 0;
+        g_lastModbusTxMs = millis();
         lastWriteWatt = now;
       }
 
       if (now - lastWriteKa >= 1000) {
-        bool kaSuccess = false;
-        for (int retry = 0; retry < 3; retry++) {
-          if (modbusWrite16(MODBUS_REG_STAY_ALIVE, ka++)) {
-            kaSuccess = true;
-            g_lastModbusTxMs = millis();
-            break;
-          }
-          vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        if (!kaSuccess) {
+        if (!modbusWrite16(MODBUS_REG_STAY_ALIVE, ka++)) {
           DBG_PRINTLN("❌ KA failed → reconnecting");
-          client.stop();
-          modbusConnected = false;
+          modbusFailCount++;
+          if (modbusFailCount >= 5) {
+            client.stop();
+            modbusConnected = false;
+            modbusFailCount = 0;
+            if (lastReportedModbusState != modbusConnected) {
+              lastReportedModbusState = modbusConnected;
+              sendLiveData();
+            }
+          }
           continue;
         }
+        modbusFailCount = 0;
+        g_lastModbusTxMs = millis();
         if (ka > 9999) ka = 1;
         lastWriteKa = now;
       }
 
-      if (now - lastReadPwrRete >= 200) {
+      if (now - lastReadPwrRete >= 500) {
         uint16_t raw = 0;
-        bool ok = false;
-        for (int retry = 0; retry < 2; retry++) {
-          if (modbusReadInput16(MODBUS_INPUT_POTENZA_RETE, raw)) {
-            ok = true;
-            g_lastModbusRxMs = millis();
-            break;
+        if (!modbusReadInput16(MODBUS_INPUT_POTENZA_RETE, raw)) {
+          modbusFailCount++;
+          if (modbusFailCount >= 5) {
+            client.stop();
+            modbusConnected = false;
+            modbusFailCount = 0;
+            if (lastReportedModbusState != modbusConnected) {
+              lastReportedModbusState = modbusConnected;
+              sendLiveData();
+            }
           }
-          vTaskDelay(pdMS_TO_TICKS(80));
+          continue;
         }
-        if (ok) {
-          int16_t s = (int16_t)raw;
-          PowerRete = (float)s / 10.0f;
-        }
+        modbusFailCount = 0;
+        markModbusValidatedRx();
+        int16_t s = (int16_t)raw;
+        PowerRete = (float)s / 10.0f;
         lastReadPwrRete = now;
 
-        if (now - lastReadCosfi >= 200) {
+        if (now - lastReadCosfi >= 500) {
         uint16_t rawCosfi = 0;
-        bool okCosfi = false;
-        for (int retry = 0; retry < 2; retry++) {
-          if (modbusReadInput16(MODBUS_INPUT_COSFI, rawCosfi)) {
-            okCosfi = true;
-            g_lastModbusRxMs = millis();
-            break;
+        if (!modbusReadInput16(MODBUS_INPUT_COSFI, rawCosfi)) {
+          modbusFailCount++;
+          if (modbusFailCount >= 5) {
+            client.stop();
+            modbusConnected = false;
+            modbusFailCount = 0;
+            if (lastReportedModbusState != modbusConnected) {
+              lastReportedModbusState = modbusConnected;
+              sendLiveData();
+            }
           }
-          vTaskDelay(pdMS_TO_TICKS(80));
+          continue;
         }
-        if (okCosfi) {
+        modbusFailCount = 0;
+        markModbusValidatedRx();
+        {
           int16_t sCosfi = (int16_t)rawCosfi;
           float cf = (float)sCosfi / 100.0f;
           CosfiRete = constrain(cf, -1.0f, 1.0f);
@@ -826,33 +982,46 @@ void ModbusTask(void *pvParameters) {
       }
       }
 
-    } else if (ethernetConnected && !modbusConnected) {
-      if (millis() - lastReconnectAttempt >= 5000 || lastReconnectAttempt == 0) {
-        const uint16_t reconnectTimeoutMs = 200;
-        DBG_PRINT("🔗 Modbus reconnect to ");
-        DBG_PRINTLN(MODBUS_SLAVE_IP);
-
-        lastReconnectAttempt = millis();
-        client.stop();
-
-        client.setTimeout(reconnectTimeoutMs);
-        g_netBusy = true;
-        bool connected = client.connect(MODBUS_SLAVE_IP, MODBUS_PORT);
-        g_netBusy = false;
-
-        if (connected) {
-          DBG_PRINTLN("🎉 Modbus connected!");
-          modbusConnected = true;
-          client.setTimeout(reconnectTimeoutMs);
-          g_lastModbusTxMs = millis();
-        } else {
-          DBG_PRINTLN("❌ Modbus reconnect failed");
-        }
-      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
   }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 📊 MONITOR NETWORK UI EVENTS - TRANSITION DETECTION
+// ═══════════════════════════════════════════════════════════
+void monitorNetworkUiEvents() {
+  static bool lastEthOk = false;
+  static bool lastModbusOk = false;
+  static bool firstRun = true;
+
+  bool ethOk =
+      w5500Available &&
+      ETH.linkUp() &&
+      ETH.localIP() != IPAddress(0,0,0,0);
+
+  bool modbusOk =
+      ethOk &&
+      modbusConnected &&
+      (millis() - g_lastModbusRxMs < MODBUS_RX_TIMEOUT_MS);
+
+  if (firstRun || ethOk != lastEthOk) {
+    if (!firstRun) {
+      if (ethOk) {
+        webUiLogMessage("🟢 Ethernet link restored");
+      } else {
+        webUiLogMessage("🔴 Ethernet cable lost");
+      }
+    }
+    lastEthOk = ethOk;
+  }
+
+  if (firstRun || modbusOk != lastModbusOk) {
+    lastModbusOk = modbusOk;
+  }
+
+  firstRun = false;
 }
 
 void modbusTickKAandWatt() {
@@ -1160,14 +1329,9 @@ float c_c_raw = iC_counts * IRMS_SCALE_BASE_C * CT_Ratio * currentFactor;
 // ========== TASK PENTRU MĂSURĂRI ==========
 void TaskMeter(void *pv) {
   for (;;) {
-    if (xSemaphoreTake(xAdeIrqSem, pdMS_TO_TICKS(200)) == pdTRUE) {
-      meter.resetStatus();
-      doMeasurements();
-    } else {
-      Serial.println("⚠️ ADE7758 IRQ timeout - citire forțată");
-      meter.resetStatus();
-      doMeasurements();
-    }
+    meter.resetStatus();
+    doMeasurements();
+    vTaskDelay(pdMS_TO_TICKS(200));
   }
 }
 
@@ -1903,8 +2067,8 @@ DBG_PRINTf("   Offset I_A/B/C (counts): %.0f / %.0f / %.0f\n", currentOffsetA, c
   // Task-ul Modbus rulează mereu; dacă nu există Ethernet, rămâne inactiv fără blocaje.
   Serial.println();
   Serial.println("Pornire Modbus Task...");
-  xTaskCreatePinnedToCore(ModbusTask, "ModbusTask", 4096, NULL, 1, NULL, 0);
-  Serial.println("✅ Modbus Task activ (Core 0)");
+  xTaskCreatePinnedToCore(ModbusTask, "ModbusTask", 4096, NULL, 1, NULL, 1);
+  Serial.println("✅ Modbus Task activ (Core 1)");
 
   Serial.println();
 
@@ -1915,9 +2079,9 @@ DBG_PRINTf("   Offset I_A/B/C (counts): %.0f / %.0f / %.0f\n", currentOffsetA, c
   Serial.println("│    RTOS Tasks                         │");
   Serial.println("└───────────────────────────────────────┘");
   
-  xTaskCreatePinnedToCore(ModbusReconnectTask, "ModbusReconnect", 4096, NULL, 1, 
-                          &TaskHandle_ModbusReconnect, 1);
-  Serial.println("✅ Modbus Reconnect Task (Core 1)");
+  // xTaskCreatePinnedToCore(ModbusReconnectTask, "ModbusReconnect", 4096, NULL, 1, 
+  //                         &TaskHandle_ModbusReconnect, 1);
+  // Serial.println("✅ Modbus Reconnect Task (Core 1)");
   
   xTaskCreatePinnedToCore(updatePWMFromWatt, "PWM_Control", 8192, NULL, 1, 
                           &TaskHandle_Core2, 1);
@@ -1981,9 +2145,9 @@ xTaskCreatePinnedToCore(
     "TaskMeter",
     8192,
     NULL,
-    2,
+    3,
     NULL,
-    1
+    0
 );
 // Calibrare baseline touch după init complet
 {
@@ -2007,6 +2171,34 @@ lastTouchTime = millis();
 //================== Loop ===================
 void loop() {
   const uint32_t now_ms = millis();
+
+  // ⚡ RAPID ETHERNET PHYSICAL CHECK (500ms) - DETECT CABLE LOSS IMMEDIATELY
+  static uint32_t lastEthCheckMs = 0;
+  if (now_ms - lastEthCheckMs >= 500) {
+    lastEthCheckMs = now_ms;
+
+    bool ethNow =
+        w5500Available &&
+        ETH.linkUp() &&
+        ETH.localIP() != IPAddress(0,0,0,0);
+
+    if (!ethNow) {
+      if (ethernetConnected || modbusConnected) {
+        if (client.connected()) client.stop();
+        ethernetConnected = false;
+        modbusConnected = false;
+        g_lastModbusRxMs = 0;
+        webUiLogMessage("🔴 Ethernet cable lost");
+        sendLiveData();
+      }
+    } else {
+      if (!ethernetConnected) {
+        ethernetConnected = true;
+        webUiLogMessage("🟢 Ethernet link restored");
+        sendLiveData();
+      }
+    }
+  }
 
   if (Serial.available()) {
   String cmd = Serial.readStringUntil('\n');
@@ -2074,7 +2266,6 @@ void loop() {
   static uint32_t lastMeasurement   = 0;
   static uint32_t lastDisplayUpdate = 0;
   static uint32_t lastDebugPrint    = 0;
-  static uint32_t lastEthPoll       = 0;
 
 
 
@@ -2094,28 +2285,28 @@ void loop() {
   // ═══════════════════════════════════════════════════════════
   // 🌐 CHECK ETHERNET LINK STATE — PHYSICAL TRUTH
   // ═══════════════════════════════════════════════════════════
-  uint32_t tEth = micros();
-  if (w5500Available) {
-    bool currentLinkUp = ETH.linkUp();
-    bool currentHasIP = (ETH.localIP() != IPAddress(0,0,0,0));
-
-    if (currentLinkUp && currentHasIP) {
-      if (!ethernetConnected) {
-        DBG_PRINT("📡 Ethernet LINK RESTORED: ");
-        DBG_PRINTLN(ETH.localIP());
+  static uint32_t lastEthPoll = 0;
+  static bool lastEthPhysicalOk = true;
+  if (now_ms - lastEthPoll >= 5000) {
+    lastEthPoll = now_ms;
+    const bool ethPhysicalOk = ETH.linkUp() && (ETH.localIP() != IPAddress(0,0,0,0));
+    if (ethPhysicalOk != lastEthPhysicalOk) {
+      lastEthPhysicalOk = ethPhysicalOk;
+      if (ethPhysicalOk) {
         ethernetConnected = true;
-      }
-    } else {
-      if (ethernetConnected || modbusConnected) {
-        DBG_PRINTLN("🚨 PHYSICAL CABLE CUT — killing Modbus state NOW");
+        webUiLogMessage("🟢 Ethernet link restored");
+        sendLiveData();
+      } else {
         if (client.connected()) client.stop();
         ethernetConnected = false;
         modbusConnected = false;
+        webUiLogMessage("🔴 Ethernet cable lost");
+        sendLiveData();
       }
+    } else if (!ethPhysicalOk) {
+      ethernetConnected = false;
+      modbusConnected = false;
     }
-  } else {
-    ethernetConnected = false;
-    modbusConnected = false;
   }
   // profUpdate(prof.maxEthUs, micros() - tEth);
   // ═══════════════════════════════════════════════════════════

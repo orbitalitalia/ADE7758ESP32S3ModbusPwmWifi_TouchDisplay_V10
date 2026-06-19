@@ -284,17 +284,8 @@ void printW5500Sockets() {
 }
 void ModbusReconnectTask(void *pv) {
   for (;;) {
-    if (ethernetConnected && ETH.linkUp() && !client.connected()) {
-      DBG_PRINTLN("🔄 Trying Modbus reconnect...");
-      if (client.connect(MODBUS_SLAVE_IP, MODBUS_PORT)) {
-        DBG_PRINTLN("✅ Modbus reconnected!");
-        modbusConnected = true;
-        g_lastModbusTxMs = millis();
-      } else {
-        modbusConnected = false;
-      }
-    }
-    vTaskDelay(pdMS_TO_TICKS(5000)); // verifică la 5s
+    // Disabled: ModbusTask is the single owner of Modbus TCP socket lifecycle.
+    vTaskDelay(pdMS_TO_TICKS(5000));
   }
 }
 float CT_Primary = 200.0f;

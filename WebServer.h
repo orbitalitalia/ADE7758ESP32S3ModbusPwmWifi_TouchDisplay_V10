@@ -19,6 +19,7 @@ extern bool resetEnergyRequested;
 void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length);
 void handleWebSocketMessage(uint8_t num, uint8_t *payload, size_t length);
 void sendLiveData();
+void webUiLogMessage(const char* msg);
 void loopWebSocket();
 
 // WebServer și rutare
