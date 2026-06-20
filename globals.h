@@ -13,7 +13,7 @@
 
 extern ADE7758 meter;
 
-#define FW_VERSION "10.1"
+#define FW_VERSION "10.2"
 
 extern char fwVersionString[16];
 void updateFirmwareVersionString();

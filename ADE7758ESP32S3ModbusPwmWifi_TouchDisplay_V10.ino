@@ -783,7 +783,7 @@ void updateModbusPowerCorrection()
   gridPowerErrorW = powerReteW - (float)setpoint;
 
   // Integrator accumulation.
-  modbusPowerCorrectionW += gridPowerErrorW * 0.005f;
+  modbusPowerCorrectionW += gridPowerErrorW * 0.02f;
 
   // Constrain to non-negative range with dynamic upper limit.
   float correctionMaxW = min((float)prez1, (float)setpoint);
@@ -1460,7 +1460,7 @@ void setup() {
   
   Serial.println("\n\n");
   Serial.println("╔═══════════════════════════════════════════════════════════╗");
-  Serial.println("║                ESP32-S3 POWER MONITOR V09                 ║");
+  Serial.printf("║           ESP32-S3 POWER MONITOR FW v%-16s║\n", fwVersionString);
   Serial.println("║              OTA Rollback + Dual Network                  ║");
   Serial.println("╚═══════════════════════════════════════════════════════════╝");
   Serial.println();
@@ -1672,7 +1672,8 @@ void setup() {
     display.println("EBS");
     display.setTextSize(1);
     display.setCursor(2, 28);
-    display.print("Booting V9.0...");
+    display.print("Booting v");
+    display.print(fwVersionString);
     display.display();
     Serial.println("✅ OLED Display activ");
   }
