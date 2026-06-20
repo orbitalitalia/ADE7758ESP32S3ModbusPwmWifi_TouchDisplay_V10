@@ -182,6 +182,9 @@ doc["power"] = Watt / 1000.0f;
     doc["modbus_ip"] = MODBUS_SLAVE_IP.toString();  // ✅ Invia IP corrente
     doc["export_safety_active"] = g_exportSafetyActive;
     doc["export_excess_w"] = g_exportExcessW;
+    doc["grid_error_w"] = gridPowerErrorW;
+    doc["modbus_correction_w"] = modbusPowerCorrectionW;
+    doc["modbus_correction_enabled"] = modbusCorrectionEnabled;
 
     String output;
     serializeJson(doc, output);
@@ -349,6 +352,15 @@ js += "    catch(e){ console.log('WS bad JSON:', event.data); return; }";
   js += "      document.getElementById('power').textContent = data.power.toFixed(2) + ' kW';";
   js += "      if (isNum(data.power_rete)) { const el = document.getElementById('power-rete'); if (el) el.textContent = data.power_rete.toFixed(2) + ' kW'; }";
   js += "      if (data.power_rete_source !== undefined) { const src = document.getElementById('power-rete-src'); if (src) src.textContent = data.power_rete_source; }";
+  js += "    if (isNum(data.grid_error_w)) {";
+  js += "      const el = document.getElementById('export-above-setpoint');";
+  js += "      if (el) {";
+  js += "        const exportOverW = Math.max(0, data.grid_error_w);";
+  js += "        el.textContent = exportOverW >= 1000 ? (exportOverW / 1000).toFixed(2) + ' kW' : exportOverW.toFixed(0) + ' W';";
+  js += "      }";
+  js += "    }";
+  js += "    if (isNum(data.modbus_correction_w)) { const el = document.getElementById('modbus-correction-w'); if (el) el.textContent = data.modbus_correction_w.toFixed(2) + ' W'; }";
+  js += "    if (data.modbus_correction_enabled !== undefined) { const el = document.getElementById('modbus-correction-enabled'); if (el) el.textContent = data.modbus_correction_enabled ? 'ON' : 'OFF'; }";
 
   js += "    if (isNum(data.energy)) {";
   js += "      document.getElementById('energy').textContent = data.energy.toFixed(2) + ' kWh';";
@@ -954,6 +966,14 @@ static void handleRoot() {
     html += "<label class='form-label'>IP Slave Modbus:</label>";
     html += "<input type='text' id='modbus-ip' class='form-control' value='" + MODBUS_SLAVE_IP.toString() + "'>";
     html += "<button class='btn' onclick='setModbusIP()'>Salva IP</button>";
+    html += "</div></div>";
+
+    html += "<div class='card'>";
+    html += "<div class='card-header'>Modbus Feedback</div>";
+    html += "<div style='line-height:1.8'>";
+    html += "<div><strong>Export above setpoint:</strong> <span class='value-display' id='export-above-setpoint'>0 W</span></div>";
+    html += "<div><strong>modbus_correction_w:</strong> <span class='value-display' id='modbus-correction-w'>0.00 W</span></div>";
+    html += "<div><strong>modbus_correction_enabled:</strong> <span class='value-display' id='modbus-correction-enabled'>OFF</span></div>";
     html += "</div></div>";
 
     html += "<div class='card'>";

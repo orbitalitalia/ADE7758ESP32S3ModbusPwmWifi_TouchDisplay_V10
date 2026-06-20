@@ -759,27 +759,29 @@ void updatePowerReteSnapshot()
 void updateModbusPowerCorrection()
 {
   const bool hasValidModbusData =
-  powerReteValid && ((millis() - lastPowerReteUpdateMs) < 3000UL);
+      powerReteValid && ((millis() - lastPowerReteUpdateMs) < 3000UL);
 
   if (!hasValidModbusData) {
     modbusCorrectionEnabled = false;
-    modbusPowerCorrectionW = 0.0f;
     gridPowerErrorW = 0.0f;
+    modbusPowerCorrectionW = 0.0f;
     return;
   }
 
-  modbusCorrectionEnabled = true;
+  float powerReteW = PowerRete * 1000.0f;
 
-  gridPowerErrorW =
-      (PowerRete * 1000.0f) -
-      (float)setpoint;
+  // Signed grid error for diagnostics/display (can be negative).
+  gridPowerErrorW = powerReteW - (float)setpoint;
 
-  modbusPowerCorrectionW += gridPowerErrorW * 0.05f;
+  // Integrator accumulation.
+  modbusPowerCorrectionW += gridPowerErrorW * 0.005f;
 
-  modbusPowerCorrectionW =
-      constrain(modbusPowerCorrectionW,
-                -2000.0f,
-                2000.0f);
+  // Constrain to non-negative range with dynamic upper limit.
+  float correctionMaxW = (float)prez1;
+  modbusPowerCorrectionW = constrain(modbusPowerCorrectionW, 0.0f, correctionMaxW);
+
+  // Correction is enabled only when the positive integrator is active.
+  modbusCorrectionEnabled = (modbusPowerCorrectionW > 0.0f);
 }
 
 // ==================== Task Modbus ====================
