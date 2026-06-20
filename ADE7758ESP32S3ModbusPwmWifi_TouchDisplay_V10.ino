@@ -428,7 +428,16 @@ void updatePWMFromWatt(void *pvParameters)
         if (!manualControlEnabled)
         {
             float wattIn = WattA + WattB + WattC;
-          float diffW = wattIn - (float)setpoint;
+          float effectiveSetpoint = (float)setpoint;
+
+          if (modbusCorrectionEnabled) {
+            effectiveSetpoint -= modbusPowerCorrectionW;
+            if (effectiveSetpoint < 0.0f) {
+              effectiveSetpoint = 0.0f;
+            }
+          }
+
+          float diffW = wattIn - effectiveSetpoint;
 
             float p1 = prez1;
             float p2 = prez2;
@@ -777,7 +786,10 @@ void updateModbusPowerCorrection()
   modbusPowerCorrectionW += gridPowerErrorW * 0.005f;
 
   // Constrain to non-negative range with dynamic upper limit.
-  float correctionMaxW = (float)prez1;
+  float correctionMaxW = min((float)prez1, (float)setpoint);
+  if (correctionMaxW < 0.0f) {
+    correctionMaxW = 0.0f;
+  }
   modbusPowerCorrectionW = constrain(modbusPowerCorrectionW, 0.0f, correctionMaxW);
 
   // Correction is enabled only when the positive integrator is active.
