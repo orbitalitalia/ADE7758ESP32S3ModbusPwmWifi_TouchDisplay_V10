@@ -132,6 +132,24 @@ extern float PowerRete; // kW - citita via Modbus Input 13 (Potenza rete)
 extern float CosfiRete;
 extern volatile bool g_exportSafetyActive;
 extern float g_exportExcessW;
+extern float pGenAtModbusW;
+extern float pReteAtModbusW;
+extern float pDumpRealW;
+extern float pDumpExpectedW;
+extern float pDumpErrorW;
+extern float modbusPowerCorrectionW;
+extern float gridPowerErrorW;
+extern bool modbusCorrectionEnabled;
+
+extern uint32_t lastPowerReteUpdateMs;
+
+extern bool powerReteValid;
+extern bool dumpDiagnosticEnabled;
+extern bool dumpLoadMismatch;
+
+extern bool step2DiagFault;
+extern bool step3DiagFault;
+extern bool step4DiagFault;
 extern float VA_a, VA_b, VA_c;
 extern float Var_a, Var_b, Var_c;
 extern float PfA, PfB, PfC, Pf;

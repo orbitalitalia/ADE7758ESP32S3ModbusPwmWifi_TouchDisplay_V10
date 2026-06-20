@@ -102,6 +102,25 @@ float CosfiRete = 1.0f;
 volatile bool g_exportSafetyActive = false;
 float g_exportExcessW = 0.0f;
 
+float pGenAtModbusW = 0.0f;
+float pReteAtModbusW = 0.0f;
+float pDumpRealW = 0.0f;
+float pDumpExpectedW = 0.0f;
+float pDumpErrorW = 0.0f;
+float modbusPowerCorrectionW = 0.0f;
+float gridPowerErrorW = 0.0f;
+bool modbusCorrectionEnabled = false;
+
+uint32_t lastPowerReteUpdateMs = 0;
+
+bool powerReteValid = false;
+bool dumpDiagnosticEnabled = false;
+bool dumpLoadMismatch = false;
+
+bool step2DiagFault = false;
+bool step3DiagFault = false;
+bool step4DiagFault = false;
+
 bool manualStep2 = false;
 bool manualStep3 = false;
 bool manualStep4 = false;

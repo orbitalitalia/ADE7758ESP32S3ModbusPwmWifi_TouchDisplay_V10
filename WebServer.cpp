@@ -1383,7 +1383,7 @@ void handleWebClient() {
     webSocket.loop();
 
     static unsigned long lastSend = 0;
-    if (millis() - lastSend >= 200) {
+    if (millis() - lastSend >= 100) {
       if (websocketConnected) sendLiveData();
         lastSend = millis();
     }

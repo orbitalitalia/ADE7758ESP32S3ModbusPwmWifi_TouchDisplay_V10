@@ -70,6 +70,8 @@ void printOtaState() {
 
 // Function declarations
 void modbusTickKAandWatt();
+void updatePowerReteSnapshot();
+void updateModbusPowerCorrection();
 static bool modbusWrite16(uint16_t reg, uint16_t value);
 static bool modbusReadInput16(uint16_t reg, uint16_t &outValue);
 static void modbusKeepAlive();
@@ -739,6 +741,47 @@ void OledTask(void *pvParameters) {
   }
 }
 
+void updatePowerReteSnapshot()
+{
+  pReteAtModbusW = PowerRete * 1000.0f;
+
+  // Puterea activa a generatorului este estimata folosind CosfiRete,
+  // deoarece citirile ADE/cosfi local pot oscila.
+  pGenAtModbusW = (WattA + WattB + WattC) * CosfiRete;
+  if (pGenAtModbusW < 0.0f) {
+    pGenAtModbusW = 0.0f;
+  }
+
+  lastPowerReteUpdateMs = millis();
+  powerReteValid = true;
+}
+
+void updateModbusPowerCorrection()
+{
+  const bool hasValidModbusData =
+  powerReteValid && ((millis() - lastPowerReteUpdateMs) < 3000UL);
+
+  if (!hasValidModbusData) {
+    modbusCorrectionEnabled = false;
+    modbusPowerCorrectionW = 0.0f;
+    gridPowerErrorW = 0.0f;
+    return;
+  }
+
+  modbusCorrectionEnabled = true;
+
+  gridPowerErrorW =
+      (PowerRete * 1000.0f) -
+      (float)setpoint;
+
+  modbusPowerCorrectionW += gridPowerErrorW * 0.05f;
+
+  modbusPowerCorrectionW =
+      constrain(modbusPowerCorrectionW,
+                -2000.0f,
+                2000.0f);
+}
+
 // ==================== Task Modbus ====================
 void ModbusTask(void *pvParameters) {
   static uint16_t ka = 0;
@@ -934,7 +977,7 @@ void ModbusTask(void *pvParameters) {
         lastWriteKa = now;
       }
 
-      if (now - lastReadPwrRete >= 500) {
+      if (now - lastReadPwrRete >= 100) {
         uint16_t raw = 0;
         if (!modbusReadInput16(MODBUS_INPUT_POTENZA_RETE, raw)) {
           modbusFailCount++;
@@ -953,9 +996,10 @@ void ModbusTask(void *pvParameters) {
         markModbusValidatedRx();
         int16_t s = (int16_t)raw;
         PowerRete = (float)s / 10.0f;
+        updatePowerReteSnapshot();
         lastReadPwrRete = now;
 
-        if (now - lastReadCosfi >= 500) {
+        if (now - lastReadCosfi >= 100) {
         uint16_t rawCosfi = 0;
         if (!modbusReadInput16(MODBUS_INPUT_COSFI, rawCosfi)) {
           modbusFailCount++;
@@ -976,10 +1020,13 @@ void ModbusTask(void *pvParameters) {
           int16_t sCosfi = (int16_t)rawCosfi;
           float cf = (float)sCosfi / 100.0f;
           CosfiRete = constrain(cf, -1.0f, 1.0f);
+          updatePowerReteSnapshot();
           DBG_PRINTf("📡 CosfiRete = %.3f (raw=%d)\n", CosfiRete, sCosfi);
         }
         lastReadCosfi = now;
       }
+
+      updateModbusPowerCorrection();
       }
 
     }
